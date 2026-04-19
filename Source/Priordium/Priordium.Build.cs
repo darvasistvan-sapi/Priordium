@@ -1,0 +1,55 @@
+// Copyright Priordium. All Rights Reserved.
+
+using UnrealBuildTool;
+using System.IO;
+
+public class Priordium : ModuleRules
+{
+	public Priordium(ReadOnlyTargetRules Target) : base(Target)
+	{
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+		PublicDependencyModuleNames.AddRange(new string[]
+		{
+			"Core",
+			"CoreUObject",
+			"Engine",
+			"InputCore",
+			"EnhancedInput",
+			"Landscape",
+			"Water",
+			"GameplayTags",
+			"NavigationSystem"
+		});
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"LandscapeEditor",
+				"UnrealEd",
+				"AssetTools"
+			});
+		}
+
+		PrivateDependencyModuleNames.AddRange(new string[] { });
+
+		PublicIncludePaths.AddRange(new string[]
+		{
+			ModuleDirectory + "/MapGenerator/Public"
+		});
+
+		string FastNoisePath = Path.Combine(ModuleDirectory, "../../Source/ThirdParty/FastNoise");
+		PublicIncludePaths.Add(FastNoisePath);
+		PublicDefinitions.Add("WITH_FASTNOISE=1");
+
+		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"AutomationController"
+			});
+		}
+	}
+}
+

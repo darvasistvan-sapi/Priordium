@@ -1,0 +1,34 @@
+flowchart TD
+    Settings["UMapGeneratorSettings (Data Asset - konfiguráció)"]
+    WG["AWorldGenerator (Orchestrator Actor)"]
+    HG["UHeightmapGenerator (ActorComponent)"]
+    BM["UBiomeManager (ActorComponent)"]
+    LB["ULandscapeBuilder (ActorComponent)"]
+    WSB["UWaterSystemBuilder (ActorComponent)"]
+    RD["UResourceDistributor (ActorComponent)"]
+    CZM["UClimateZoneManager (ActorComponent)"]
+
+    Settings -->|konfiguráció| WG
+    WG -->|1. lépés| HG
+    WG -->|2. lépés| BM
+    WG -->|3. lépés| LB
+    WG -->|4. lépés| WSB
+    WG -->|5. lépés| CZM
+    WG -->|6. lépés| RD
+
+    HG -->|magasságtérkép adat| BM
+    HG -->|magasságtérkép adat| LB
+    BM -->|bióm térkép| LB
+    BM -->|bióm térkép| WSB
+    BM -->|bióm térkép| RD
+    CZM -->|klíma adat| RD
+    WSB -->|víz adat| RD
+
+    style Settings fill:#b87700,stroke:#ff8c00,color:#fff
+    style WG fill:#4a90e2,stroke:#2171b5,color:#fff
+    style HG fill:#41a161,stroke:#228b22,color:#fff
+    style BM fill:#41a161,stroke:#228b22,color:#fff
+    style LB fill:#41a161,stroke:#228b22,color:#fff
+    style WSB fill:#41a161,stroke:#228b22,color:#fff
+    style RD fill:#41a161,stroke:#228b22,color:#fff
+    style CZM fill:#41a161,stroke:#228b22,color:#fff

@@ -1,0 +1,47 @@
+graph LR
+    %% Aktorok
+    Developer["👤 Level Designer<br/>/ Developer"]
+    
+    %% Fő use case-ek
+    ConfigureSettings["Térkép generálás<br/>konfigurálása"]
+    GenerateWorld["Teljes világ<br/>generálása"]
+    ClearWorld["Generált világ<br/>törlése"]
+    QueryProgress["Generálás<br/>előrehaladásának<br/>lekérdezése"]
+    
+    %% Generálási alpipeline use case-ek
+    GenerateHeightmap["Magasságtérkép<br/>generálása"]
+    AssignBiomes["Biómok<br/>kiosztása"]
+    BuildLandscape["Landscape<br/>építése"]
+    BuildWaterSystem["Vízrendszer<br/>létrehozása"]
+    CalculateClimate["Klímazónák<br/>meghatározása"]
+    DistributeResources["Erőforrások<br/>elhelyezése"]
+    
+    %% Kapcsolatok az aktorok és fő use case-ek között
+    Developer --> ConfigureSettings
+    Developer --> GenerateWorld
+    Developer --> ClearWorld
+    Developer --> QueryProgress
+    
+    %% Include kapcsolatok (GenerateWorld magában foglalja az alpipeline lépéseket)
+    GenerateWorld -.->|<<include>>| GenerateHeightmap
+    GenerateWorld -.->|<<include>>| AssignBiomes
+    GenerateWorld -.->|<<include>>| BuildLandscape
+    GenerateWorld -.->|<<include>>| BuildWaterSystem
+    GenerateWorld -.->|<<include>>| CalculateClimate
+    GenerateWorld -.->|<<include>>| DistributeResources
+    
+    %% Sorrendi függőségek az alpipeline lépések között
+    GenerateHeightmap -.->|<<require>>| AssignBiomes
+    AssignBiomes -.->|<<require>>| BuildLandscape
+    BuildLandscape -.->|<<require>>| BuildWaterSystem
+    BuildWaterSystem -.->|<<require>>| CalculateClimate
+    CalculateClimate -.->|<<require>>| DistributeResources
+    
+    %% Stílusok
+    classDef actor fill:#4a90e2,stroke:#2171b5,color:#fff,stroke-width:3px
+    classDef mainUseCase fill:#41a161,stroke:#228b22,color:#fff,stroke-width:2px
+    classDef subUseCase fill:#f5a623,stroke:#d68910,color:#fff,stroke-width:2px
+    
+    class Developer,System actor
+    class ConfigureSettings,GenerateWorld,ClearWorld,QueryProgress mainUseCase
+    class GenerateHeightmap,AssignBiomes,BuildLandscape,BuildWaterSystem,CalculateClimate,DistributeResources subUseCase
