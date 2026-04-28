@@ -25,6 +25,10 @@
 		{
 			"Name": "UnrealMCP",
 			"Enabled": false
+		},
+		{
+			"Name": "Aura",
+			"Enabled": false
 		}
 	]
 }
