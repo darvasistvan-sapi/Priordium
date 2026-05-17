@@ -102,6 +102,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Map Generator|Landscape")
 	bool BuildLandscape(const UMapGeneratorSettings* Settings, UHeightmapGenerator* Heightmap, UBiomeManager* Biome = nullptr);
 
+	/**
+	 * Flattens the landscape within the given world-space square to its lowest point.
+	 * Reads all vertex heights in the footprint via FLandscapeEditDataInterface,
+	 * sets them all to the minimum, then writes back and recreates collision.
+	 * Call this after SpawnStorage determines GroundZ so the terrain matches the building base.
+	 * Editor-only: no-op in non-editor builds.
+	 *
+	 * @param CenterX    World X of the footprint center
+	 * @param CenterY    World Y of the footprint center
+	 * @param HalfExtent Half-size of the square footprint in cm
+	 * @param Settings   Generation settings (Resolution, QuadSize)
+	 */
+	void FlattenArea(float CenterX, float CenterY, float HalfExtent, const UMapGeneratorSettings* Settings);
+
 	// -------------------------------------------------------------------------
 	// -------------------------------------------------------------------------
 

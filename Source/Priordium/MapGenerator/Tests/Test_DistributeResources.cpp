@@ -79,7 +79,7 @@ bool FTest_DistributeResources_EmptyRules::RunTest(const FString& Parameters)
 
 	UResourceDistributor* Dist = NewObject<UResourceDistributor>(GetTransientPackage(), NAME_None, RF_Transient);
 
-	// IsRegex=false: a minta tartalmaz zárójeleket, ezért kikapcsoljuk a regex értelmezést
+	// IsRegex=false: the pattern contains parentheses, so regex interpretation is disabled.
 	AddExpectedError(TEXT("GetWorld() returned null"), EAutomationExpectedErrorFlags::Contains, 1, false);
 	const bool bResult = Dist->DistributeResources(S, Gen, Biomes, nullptr, nullptr);
 	TestFalse(TEXT("Empty ResourceSpawnRules returns false"), bResult);
@@ -120,7 +120,7 @@ bool FTest_DistributeResources_InvalidTag_Skipped::RunTest(const FString& Parame
 
 	UResourceDistributor* Dist = NewObject<UResourceDistributor>(GetTransientPackage(), NAME_None, RF_Transient);
 
-	// IsRegex=false: a minta tartalmaz zárójeleket, ezért kikapcsoljuk a regex értelmezést
+	// IsRegex=false: the pattern contains parentheses, so regex interpretation is disabled.
 	AddExpectedError(TEXT("GetWorld() returned null"), EAutomationExpectedErrorFlags::Contains, 1, false);
 	const bool bResult = Dist->DistributeResources(S, Gen, Biomes, nullptr, nullptr);
 	TestFalse(TEXT("Rule with invalid ResourceTag is skipped, no actors spawned"), bResult);

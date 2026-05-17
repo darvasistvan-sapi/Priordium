@@ -217,6 +217,54 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Resources",
 		meta = (ToolTip = "List of resource spawn rules. Each entry defines how a specific resource type is placed on the map."))
 	TArray<FResourceSpawnRule> ResourceSpawnRules;
+
+	// -------------------------------------------------------------------------
+	// Tribes
+	// -------------------------------------------------------------------------
+
+	/** Number of tribes to generate. Tribes are placed as far apart as possible. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Number of tribes to generate on the map.", ClampMin = "1", ClampMax = "20"))
+	int32 TribeCount = 3;
+
+	/**
+	 * Blueprint class for the Tribe actor (assign BP_Tribe).
+	 * One instance is spawned per tribe and assigned to the 'Tribe' variable on
+	 * every TribeMan and Storage that belongs to that tribe.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Blueprint class for the Tribe actor. Assign BP_Tribe."))
+	TSubclassOf<AActor> TribeClass;
+
+	/** Number of TribeMan actors spawned per tribe. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "How many TribeMan actors each tribe receives.", ClampMin = "1", ClampMax = "20"))
+	int32 TribeManCountPerTribe = 5;
+
+	/** Radius (cm) around the Storage in which TribeMan actors are spawned. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Spawn radius around the Storage for TribeMan actors.", ClampMin = "100.0", ClampMax = "50000.0"))
+	float TribeManSpawnRadius = 3000.f;
+
+	/** Blueprint class to use for TribeMan actors (assign BP_TribeMan). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Blueprint class for TribeMan actors. Assign BP_TribeMan."))
+	TSubclassOf<AActor> TribeManClass;
+
+	/** Blueprint class to use for Storage actors (assign BP_Storage). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Blueprint class for Storage actors. Assign BP_Storage."))
+	TSubclassOf<AActor> StorageClass;
+
+	/** Blueprint class to use for TribeManager actors. Leave null to use the base C++ ATribeManager. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Blueprint class for TribeManager. Leave null to use base ATribeManager."))
+	TSubclassOf<AActor> TribeManagerClass;
+
+	/** Resource Blueprint class forwarded to each spawned TribeManager as resourceBaseClass. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
+		meta = (ToolTip = "Resource base class assigned to each TribeManager. Assign BP_Resource."))
+	TSubclassOf<AActor> TribeResourceBaseClass;
 };
 
 

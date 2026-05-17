@@ -19,7 +19,10 @@ public class Priordium : ModuleRules
 			"Landscape",
 			"Water",
 			"GameplayTags",
-			"NavigationSystem"
+			"NavigationSystem",
+			"UMG",
+			"Slate",
+			"SlateCore"
 		});
 
 		if (Target.bBuildEditor)
@@ -27,6 +30,7 @@ public class Priordium : ModuleRules
 			PrivateDependencyModuleNames.AddRange(new string[]
 			{
 				"LandscapeEditor",
+				"Foliage",
 				"UnrealEd",
 				"AssetTools"
 			});
@@ -36,7 +40,9 @@ public class Priordium : ModuleRules
 
 		PublicIncludePaths.AddRange(new string[]
 		{
-			ModuleDirectory + "/MapGenerator/Public"
+			ModuleDirectory + "/MapGenerator/Public",
+			ModuleDirectory + "/Tribe",
+			ModuleDirectory + "/UI"
 		});
 
 		string FastNoisePath = Path.Combine(ModuleDirectory, "../../Source/ThirdParty/FastNoise");

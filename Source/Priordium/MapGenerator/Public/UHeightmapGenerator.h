@@ -50,6 +50,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Map Generator|Heightmap")
 	bool IsInitialized() const { return HeightmapData.Num() > 0; }
 
+	bool GetTerrainHeight(
+		UWorld*                      World,
+		float                        X,
+		float                        Y,
+		float&                       OutZ,
+		const UMapGeneratorSettings* Settings) const;
+
 	// -------------------------------------------------------------------------
 	// -------------------------------------------------------------------------
 

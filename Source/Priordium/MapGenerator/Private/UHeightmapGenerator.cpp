@@ -8,6 +8,7 @@
 #include "UMapGeneratorSettings.h"
 #include "FNoiseWrapper.h"
 #include "Math/RandomStream.h"
+#include "LandscapeProxy.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogHeightmapGenerator, Log, All);
 
@@ -327,4 +328,83 @@ void UHeightmapGenerator::ApplyHydraulicErosion(const FHeightmapConfig& Config, 
 	NormalizeHeightmap();
 }
 
+// static
+bool UHeightmapGenerator::GetTerrainHeight(
+	UWorld*                      World,
+	float                        X,
+	float                        Y,
+	float&                       OutZ,
+	const UMapGeneratorSettings* Settings) const
+{
+	// --- Primary: multi-hit object trace, prefer the ALandscapeProxy surface ---
+	// Using LineTraceMulti so we can sift through all hits and pick the actual landscape,
+	// rather than stopping at the first thing above it (water plane, resource mesh, etc.).
+	{
+		TArray<FHitResult> HitResults;
+		FCollisionQueryParams QueryParams;
+		QueryParams.bTraceComplex = false;
 
+		FCollisionObjectQueryParams ObjectQuery(FCollisionObjectQueryParams::AllStaticObjects);
+
+		if (World->LineTraceMultiByObjectType(
+			HitResults,
+			FVector(X, Y, 500000.f),
+			FVector(X, Y, -500000.f),
+			ObjectQuery,
+			QueryParams))
+		{
+			// First pass: look for the actual landscape surface
+			for (const FHitResult& Hit : HitResults)
+			{
+				if (Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>())
+				{
+					OutZ = Hit.Location.Z;
+					return true;
+				}
+			}
+
+			// Second pass: no landscape actor found, pick the deepest (lowest Z) hit.
+			// Terrain is always below water bodies / foliage / placed actors.
+			float LowestZ = TNumericLimits<float>::Max();
+			for (const FHitResult& Hit : HitResults)
+			{
+				if (Hit.Location.Z < LowestZ)
+				{
+					LowestZ = Hit.Location.Z;
+				}
+			}
+			OutZ = LowestZ;
+			return true;
+		}
+	}
+
+	UE_LOG(LogHeightmapGenerator, Verbose,
+		TEXT("GetTerrainHeight: trace missed at (%.0f, %.0f) -- trying heightmap fallback."), X, Y);
+
+	// --- Fallback: derive Z from the heightmap using the landscape height formula ---
+	// ULandscapeBuilder remaps float[0,1] -> uint16 V/2+16384, then sets actor Z scale = 50.
+	// UE landscape formula:  WorldZ = (uint16 - 32768) * (1/128) * ZScale
+	// Combined:              WorldZ = (Height * 32767.5 - 16384) * (50 / 128)
+	if (this->IsInitialized() && Settings)
+	{
+		const FIntPoint Res      = this->GetResolution();
+		const float     CellSize = static_cast<float>(Settings->QuadSize);
+		const FVector2D MapOrigin(
+			-(Res.X - 1) * CellSize * 0.5f,
+			-(Res.Y - 1) * CellSize * 0.5f);
+
+		const int32 GridX = FMath::RoundToInt((X - MapOrigin.X) / CellSize);
+		const int32 GridY = FMath::RoundToInt((Y - MapOrigin.Y) / CellSize);
+
+		if (GridX >= 0 && GridX < Res.X && GridY >= 0 && GridY < Res.Y)
+		{
+			const float HeightNorm = this->GetHeightAt(GridX, GridY); // [0, 1]
+			OutZ = (HeightNorm * 32767.5f - 16384.0f) * (50.0f / 128.0f);
+			UE_LOG(LogHeightmapGenerator, Verbose,
+				TEXT("GetTerrainHeight: heightmap fallback at (%d, %d) => Z=%.1f"), GridX, GridY, OutZ);
+			return true;
+		}
+	}
+
+	return false;
+}

@@ -15,8 +15,12 @@
 #include "Components/SceneComponent.h"
 #include "UObject/UnrealType.h"
 
+#include "LandscapeComponent.h"       // ELandscapeLayerUpdateMode (runtime header, needed for FlattenArea)
+
 #if WITH_EDITOR
+#include "LandscapeEdit.h"
 #include "LandscapeEditorUtils.h"
+#include "LandscapeEditLayer.h"       // ULandscapeEditLayerBase::GetGuid(), FScopedSetLandscapeEditingLayer
 #include "AssetRegistry/AssetRegistryModule.h"
 #endif
 
@@ -348,6 +352,189 @@ void ULandscapeBuilder::ConfigureLandscapeTransform(ALandscape* Landscape, const
 		-HalfSize, -HalfSize, Settings->QuadSize, Settings->QuadSize);
 }
 
+
+void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExtent, const UMapGeneratorSettings* Settings)
+{
+	if (!GeneratedLandscape || !Settings)
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GeneratedLandscape or Settings is null."));
+		return;
+	}
+
+	ALandscape* Landscape = Cast<ALandscape>(GeneratedLandscape);
+	if (!Landscape)
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GeneratedLandscape is not an ALandscape."));
+		return;
+	}
+
+	ULandscapeInfo* LandscapeInfo = Landscape->GetLandscapeInfo();
+	if (!LandscapeInfo)
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: LandscapeInfo is null."));
+		return;
+	}
+
+	// Get actual landscape extent (vertex index bounds from the import).
+	int32 LandMinX, LandMinY, LandMaxX, LandMaxY;
+	if (!LandscapeInfo->GetLandscapeExtent(LandMinX, LandMinY, LandMaxX, LandMaxY))
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GetLandscapeExtent failed."));
+		return;
+	}
+
+	// Convert world-space footprint bounds to landscape vertex indices.
+	const FVector LandLoc   = Landscape->GetActorLocation();
+	const FVector LandScale = Landscape->GetActorScale3D();
+
+	if (FMath::IsNearlyZero(LandScale.X) || FMath::IsNearlyZero(LandScale.Y))
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: Landscape scale is ~zero."));
+		return;
+	}
+
+	// Non-const: FLandscapeEditDataInterface::GetHeightData takes int32& (modifies the coords to actual extent)
+	int32 MinVertX = FMath::Clamp(FMath::FloorToInt((CenterX - HalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
+	int32 MinVertY = FMath::Clamp(FMath::FloorToInt((CenterY - HalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
+	int32 MaxVertX = FMath::Clamp(FMath::CeilToInt( (CenterX + HalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
+	int32 MaxVertY = FMath::Clamp(FMath::CeilToInt( (CenterY + HalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
+
+	UE_LOG(LogLandscapeBuilder, Display,
+		TEXT("FlattenArea: world(%.0f,%.0f)±%.0f  LandLoc(%.0f,%.0f)  Scale(%.1f,%.1f)  -> verts[%d,%d]-[%d,%d]  extent[%d,%d]-[%d,%d]"),
+		CenterX, CenterY, HalfExtent,
+		LandLoc.X, LandLoc.Y, LandScale.X, LandScale.Y,
+		MinVertX, MinVertY, MaxVertX, MaxVertY,
+		LandMinX, LandMinY, LandMaxX, LandMaxY);
+
+	if (MinVertX >= MaxVertX || MinVertY >= MaxVertY)
+	{
+		UE_LOG(LogLandscapeBuilder, Warning,
+			TEXT("FlattenArea: degenerate vertex range [%d,%d]-[%d,%d] -- footprint outside landscape?"),
+			MinVertX, MinVertY, MaxVertX, MaxVertY);
+		return;
+	}
+
+	const int32 SizeX = MaxVertX - MinVertX + 1;
+	const int32 SizeY = MaxVertY - MinVertY + 1;
+
+	TArray<uint16> HeightData;
+	HeightData.SetNumZeroed(SizeX * SizeY);
+
+	// Determine execution context upfront
+	UWorld* World = GetWorld();
+	const bool bIsEditor = World && (World->WorldType == EWorldType::Editor);
+	const bool bIsPIE    = World && (World->WorldType == EWorldType::PIE);
+
+	// Use appropriate heightmap access based on context
+#if WITH_EDITOR
+	FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
+
+	if (bIsEditor)
+	{
+		// Editor: use scoped edit layer for proper persistence
+		FGuid BaseLayerGuid;
+		if (Landscape->GetLayersConst().Num() > 0)
+		{
+			if (const FLandscapeLayer* BaseLayer = Landscape->GetLayerConst(0))
+			{
+				if (BaseLayer->EditLayer)
+				{
+					BaseLayerGuid = BaseLayer->EditLayer->GetGuid();
+					UE_LOG(LogLandscapeBuilder, Log,
+						TEXT("FlattenArea (Editor): targeting edit layer '%s' (guid %s)."),
+						*BaseLayer->EditLayer->GetName().ToString(),
+						*BaseLayerGuid.ToString());
+				}
+			}
+		}
+
+		FScopedSetLandscapeEditingLayer ScopedLayer(Landscape, BaseLayerGuid, [Landscape]()
+		{
+			Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All);
+		});
+
+		LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
+	}
+	else if (bIsPIE)
+	{
+		// PIE: skip edit layer scope entirely, access heightmap directly
+		// Using empty GUID to access the heightmap without edit layer context
+		LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
+		UE_LOG(LogLandscapeBuilder, Display, TEXT("FlattenArea (PIE): reading heightmap without edit layer context."));
+	}
+#else
+	FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
+	LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
+#endif
+
+	// Find the minimum height across the footprint (ignore 0 -- uninitialized sentinel)
+	uint16 MinHeight = TNumericLimits<uint16>::Max();
+	for (const uint16 H : HeightData)
+	{
+		if (H > 0) MinHeight = FMath::Min(MinHeight, H);
+	}
+
+	if (MinHeight == TNumericLimits<uint16>::Max())
+	{
+		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GetHeightData returned only zeroes -- landscape may not be initialized."));
+		return;
+	}
+
+	// Flatten all vertices to the minimum height
+	for (uint16& H : HeightData)
+	{
+		H = MinHeight;
+	}
+
+	// Write the flattened heights back
+	LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0, /*CalcNormals=*/true);
+
+	UE_LOG(LogLandscapeBuilder, Display,
+		TEXT("FlattenArea: vertices [%d,%d]-[%d,%d] (%dx%d) flattened to uint16=%d."),
+		MinVertX, MinVertY, MaxVertX, MaxVertY, SizeX, SizeY, MinHeight);
+
+	// Trigger GPU recomposition and collision update for both contexts
+	Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All);
+	
+	if (bIsPIE)
+	{
+		UE_LOG(LogLandscapeBuilder, Display, TEXT("FlattenArea (PIE): GPU recomposition requested without edit layer scope."));
+	}
+
+	// RequestLayersContentUpdate queues a deferred GPU recomposition — the physics
+	// collision mesh is NOT rebuilt synchronously. Explicitly recreate collision on
+	// every landscape component that overlaps the modified vertex rectangle so the
+	// terrain is physically solid at the correct height in both editor and PIE.
+	for (ULandscapeComponent* Component : Landscape->LandscapeComponents)
+	{
+		if (!Component) continue;
+
+		const int32 CompMinX = Component->SectionBaseX;
+		const int32 CompMinY = Component->SectionBaseY;
+		const int32 CompMaxX = CompMinX + Component->ComponentSizeQuads;
+		const int32 CompMaxY = CompMinY + Component->ComponentSizeQuads;
+
+		if (CompMaxX < MinVertX || CompMinX > MaxVertX ||
+			CompMaxY < MinVertY || CompMinY > MaxVertY)
+		{
+			continue;
+		}
+
+		// RequestHeightmapUpdate re-reads the heightmap texture and rebuilds
+		// both the render data and the physics collision mesh for this component.
+		// bUpdateAll=false limits the update to dirty regions; bUpdateCollision=true
+		// ensures the physics heightfield is rebuilt (critical for PIE correctness).
+		Component->RequestHeightmapUpdate(/*bUpdateAll=*/false, /*bUpdateCollision=*/true);
+	}
+
+	// Mark the asset dirty only in the pure editor world so the change persists
+	// after the session. In PIE the landscape is a transient duplicate and marking
+	// it dirty would incorrectly prompt a save on PIE end.
+	if (World && World->WorldType == EWorldType::Editor)
+	{
+		Landscape->MarkPackageDirty();
+	}
+}
 
 TArray<uint16> ULandscapeBuilder::ConvertHeightmapToUint16(const TArray<float>& Heightmap) const
 {

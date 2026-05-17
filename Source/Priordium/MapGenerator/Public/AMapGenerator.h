@@ -17,6 +17,7 @@ class ULandscapeBuilder;
 class UWaterSystemBuilder;
 class UClimateZoneManager;
 class UResourceDistributor;
+class UTribeGenerator;
 class UMapGeneratorSettings;
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Map Generator|Components")
 	UResourceDistributor* ResourceDistributor;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Map Generator|Components")
+	UTribeGenerator* TribeGenerator;
+
 	/** Generation settings data asset. Assign in the editor Details Panel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Map Generator")
 	UMapGeneratorSettings* GeneratorSettings;
@@ -94,7 +98,7 @@ public:
 
 	/**
 	 * Executes a single generation pipeline step.
-	 * Steps: 0=Heightmap, 1=Biomes, 2=Climate, 3=Water, 4=Landscape, 5=Resources.
+	 * Steps: 0=Heightmap, 1=Biomes, 2=Climate, 3=Water, 4=Landscape, 5=Resources, 6=Tribes.
 	 * Returns false for out-of-range indices.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Map Generator")
@@ -132,6 +136,14 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Map Generator")
 	void ClearGeneratedWorld();
 
+	/**
+	 * Regenerates only the tribes (clears existing ones first).
+	 * Requires that GenerateWorld() has already been run so the heightmap
+	 * and landscape are available.
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Map Generator")
+	void GenerateTribesOnly();
+
 	/** If true, GenerateWorld() is called automatically on BeginPlay. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Map Generator")
 	bool bAutoGenerateOnBeginPlay = false;
@@ -152,7 +164,7 @@ protected:
 
 private:
 
-	static constexpr int32 TotalSteps = 6;
+	static constexpr int32 TotalSteps = 7;
 
 	bool  bIsGenerating   = false;
 	float CurrentProgress = 0.0f;
@@ -163,6 +175,7 @@ private:
 	bool ExecuteStepWater();
 	bool ExecuteStepLandscape();
 	bool ExecuteStepResources();
+	bool ExecuteStepTribes();
 
 	void OnGenerationSuccess();
 	void OnGenerationError(const FString& Reason);

@@ -10,6 +10,7 @@
 #include "UWaterSystemBuilder.h"
 #include "UClimateZoneManager.h"
 #include "UResourceDistributor.h"
+#include "UTribeGenerator.h"
 #include "UMapGeneratorSettings.h"
 #include "EngineUtils.h"
 #include "NavigationSystem.h"
@@ -33,6 +34,7 @@ AMapGenerator::AMapGenerator()
 	WaterSystemBuilder  = CreateDefaultSubobject<UWaterSystemBuilder>(TEXT("WaterSystemBuilder"));
 	ClimateZoneManager  = CreateDefaultSubobject<UClimateZoneManager>(TEXT("ClimateZoneManager"));
 	ResourceDistributor = CreateDefaultSubobject<UResourceDistributor>(TEXT("ResourceDistributor"));
+	TribeGenerator      = CreateDefaultSubobject<UTribeGenerator>(TEXT("TribeGenerator"));
 }
 
 void AMapGenerator::BeginPlay()
@@ -56,7 +58,8 @@ bool AMapGenerator::ExecuteGenerationStep(int32 StepIndex)
 		&AMapGenerator::ExecuteStepClimate,
 		&AMapGenerator::ExecuteStepWater,
 		&AMapGenerator::ExecuteStepLandscape,
-		&AMapGenerator::ExecuteStepResources
+		&AMapGenerator::ExecuteStepResources,
+		&AMapGenerator::ExecuteStepTribes
 	};
 
 	if (StepIndex < 0 || StepIndex >= TotalSteps)
@@ -91,12 +94,13 @@ void AMapGenerator::GenerateWorld()
 
 #if WITH_EDITOR
 	static const TCHAR* StepNames[TotalSteps] = {
-		TEXT("Heightmap generálása"),
-		TEXT("Biome kiosztás"),
-		TEXT("Klímazónák számítása"),
-		TEXT("Vízrendszer felépítése"),
-		TEXT("Landscape létrehozása"),
-		TEXT("Erőforrások elosztása"),
+		TEXT("Generating heightmap"),
+		TEXT("Assigning biomes"),
+		TEXT("Calculating climate zones"),
+		TEXT("Building water system"),
+		TEXT("Creating landscape"),
+		TEXT("Distributing resources"),
+		TEXT("Generating Tribes"),
 	};
 	FScopedSlowTask SlowTask(static_cast<float>(TotalSteps),
 		FText::FromString(TEXT("Generating World...")));
@@ -154,6 +158,29 @@ void AMapGenerator::ClearGeneratedWorld()
 	int32 DestroyedWaterBodies = 0;
 	int32 DestroyedLandscapeActors = 0;
 	int32 DestroyedFallbackActors = 0;
+
+	// Destroy spawned tribes: find every actor tagged "MapGen_tribe" and destroy it.
+	// Tag-based lookup is reliable even when the generator's tracking arrays are stale.
+	if (World)
+	{
+		TArray<AActor*> TribeActors;
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			if (It->Tags.Contains(FName(TEXT("MapGen_tribe"))))
+			{
+				TribeActors.Add(*It);
+			}
+		}
+		for (AActor* Actor : TribeActors)
+		{
+			DestroyActorSafe(Actor);
+		}
+	}
+	// Also reset the generator's tracking arrays
+	if (TribeGenerator)
+	{
+		TribeGenerator->ClearTribes();
+	}
 
 	// Destroy spawned resources
 	if (ResourceDistributor)
@@ -215,6 +242,63 @@ void AMapGenerator::ClearGeneratedWorld()
 	UE_LOG(LogMapGenerator, Display,
 		TEXT("AMapGenerator::ClearGeneratedWorld -- world cleared. tracked water=%d, tracked landscape=%d, fallback=%d"),
 		DestroyedWaterBodies, DestroyedLandscapeActors, DestroyedFallbackActors);
+}
+
+void AMapGenerator::GenerateTribesOnly()
+{
+	if (bIsGenerating)
+	{
+		UE_LOG(LogMapGenerator, Warning, TEXT("GenerateTribesOnly -- generation already in progress."));
+		return;
+	}
+
+	if (!TribeGenerator)
+	{
+		UE_LOG(LogMapGenerator, Warning, TEXT("GenerateTribesOnly -- TribeGenerator is null."));
+		return;
+	}
+
+	if (!HeightmapGenerator || !HeightmapGenerator->IsInitialized())
+	{
+		UE_LOG(LogMapGenerator, Warning,
+			TEXT("GenerateTribesOnly -- HeightmapGenerator is null or not initialized. Run GenerateWorld() first."));
+		return;
+	}
+
+	if (!ValidateSettings())
+	{
+		UE_LOG(LogMapGenerator, Warning, TEXT("GenerateTribesOnly -- settings invalid."));
+		return;
+	}
+
+	bIsGenerating = true;
+
+#if WITH_EDITOR
+	FScopedSlowTask SlowTask(2.f, FText::FromString(TEXT("Generating Tribes...")));
+	SlowTask.MakeDialog(false);
+	SlowTask.EnterProgressFrame(1.f, FText::FromString(TEXT("Clearing existing tribes...")));
+#endif
+
+	TribeGenerator->ClearTribes();
+
+#if WITH_EDITOR
+	SlowTask.EnterProgressFrame(1.f, FText::FromString(TEXT("Spawning tribes...")));
+#endif
+
+	const bool bGenerated = TribeGenerator->GenerateTribes(GeneratorSettings, HeightmapGenerator, LandscapeBuilder);
+
+	bIsGenerating = false;
+
+	if (bGenerated)
+	{
+		UE_LOG(LogMapGenerator, Display, TEXT("GenerateTribesOnly -- done."));
+		OnGenerationCompleted.Broadcast();
+	}
+	else
+	{
+		UE_LOG(LogMapGenerator, Warning,
+			TEXT("GenerateTribesOnly -- GenerateTribes() spawned no tribes. Check TribeManClass/StorageClass in settings."));
+	}
 }
 
 bool AMapGenerator::ValidateSettings() const
@@ -354,6 +438,28 @@ bool AMapGenerator::ExecuteStepResources()
 		// DistributeResources can return false if no rules are configured -- not an error
 		UE_LOG(LogMapGenerator, Display,
 			TEXT("Step 5 -- ResourceDistributor::DistributeResources() reported no distributions (treated as success)."));
+	}
+
+	return true;
+}
+
+bool AMapGenerator::ExecuteStepTribes()
+{
+	if (!TribeGenerator || !HeightmapGenerator)
+	{
+		UE_LOG(LogMapGenerator, Warning, TEXT("Step 6 failed: TribeGenerator or HeightmapGenerator is null"));
+		return false;
+	}
+
+	UE_LOG(LogMapGenerator, Display, TEXT("Step 6 -- TribeGenerator::GenerateTribes()"));
+	const bool bGenerated = TribeGenerator->GenerateTribes(GeneratorSettings, HeightmapGenerator, LandscapeBuilder);
+
+	if (!bGenerated)
+	{
+		// No tribes spawned is not a pipeline error (for example, if TribeManClass
+		// is not set in the settings), just like the ResourceDistributor case.
+		UE_LOG(LogMapGenerator, Display,
+			TEXT("Step 6 -- TribeGenerator::GenerateTribes() spawned no tribes (treated as success)."));
 	}
 
 	return true;
