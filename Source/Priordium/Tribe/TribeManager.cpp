@@ -99,6 +99,65 @@ int32 ATribeManager::GetResourceAmount(FName ResourceType) const
 	return Total;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Item price lookup
+// Resolves the FMapProperty (key = FClassProperty, value = FObjectProperty)
+// named ItemPricesPricesPropertyName on the ItemPrices object and returns the
+// BP_ItemPrice_C instance whose key matches ItemClass.
+// ─────────────────────────────────────────────────────────────────────────────
+
+UObject* ATribeManager::GetItemPrice(TSubclassOf<AActor> ItemClass) const
+{
+	if (!ItemPrices)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATribeManager::GetItemPrice: ItemPrices is not set."));
+		return nullptr;
+	}
+	if (!ItemClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATribeManager::GetItemPrice: ItemClass is null."));
+		return nullptr;
+	}
+
+	FMapProperty* MapProp = FindFProperty<FMapProperty>(
+		ItemPrices->GetClass(), ItemPricesPricesPropertyName);
+	if (!MapProp)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ATribeManager::GetItemPrice: Could not find map property '%s' on '%s'."),
+			*ItemPricesPricesPropertyName.ToString(),
+			*ItemPrices->GetClass()->GetName());
+		return nullptr;
+	}
+
+	FClassProperty* KeyProp = CastField<FClassProperty>(MapProp->KeyProp);
+	FObjectProperty* ValProp = CastField<FObjectProperty>(MapProp->ValueProp);
+	if (!KeyProp || !ValProp)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ATribeManager::GetItemPrice: Map property '%s' has unexpected key/value types."),
+			*ItemPricesPricesPropertyName.ToString());
+		return nullptr;
+	}
+
+	FScriptMapHelper MapHelper(MapProp, MapProp->ContainerPtrToValuePtr<void>(ItemPrices.Get()));
+	for (FScriptMapHelper::FIterator Iter(MapHelper); Iter; ++Iter)
+	{
+		const UClass* StoredClass = Cast<UClass>(
+			KeyProp->GetPropertyValue(MapHelper.GetKeyPtr(Iter.GetInternalIndex())));
+		if (StoredClass == ItemClass)
+		{
+			return ValProp->GetPropertyValue(
+				MapHelper.GetValuePtr(Iter.GetInternalIndex()));
+		}
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("ATribeManager::GetItemPrice: No price entry found for class '%s'."),
+		*ItemClass->GetName());
+	return nullptr;
+}
+
 bool ATribeManager::DeductResourceAmount(FName ResourceType, int32 Amount)
 {
 	int32 Remaining = Amount;
@@ -134,19 +193,78 @@ bool ATribeManager::DeductResourceAmount(FName ResourceType, int32 Amount)
 
 AActor* ATribeManager::Build(TSubclassOf<AActor> BuildingClass, FVector Location)
 {
-	static constexpr int32 WoodCost = 50;
-
-	const int32 Available = GetResourceAmount(WoodResourceTypeName);
-	if (Available < WoodCost)
+	// ── 1. Resolve the price object ───────────────────────────────────────────
+	UObject* PriceObj = GetItemPrice(BuildingClass);
+	if (!PriceObj)
 	{
 		UE_LOG(LogTemp, Error,
-			TEXT("ATribeManager::Build: Not enough '%s' to construct. Required: %d, Available: %d."),
-			*WoodResourceTypeName.ToString(), WoodCost, Available);
+			TEXT("ATribeManager::Build: No price entry found for '%s'. Build aborted."),
+			*BuildingClass->GetName());
 		return nullptr;
 	}
 
-	DeductResourceAmount(WoodResourceTypeName, WoodCost);
+	// ── 2. Read the Resources cost map from the price object ──────────────────
+	static const FName ResourcesPropertyName(TEXT("Resources"));
 
+	FMapProperty* CostMapProp = FindFProperty<FMapProperty>(
+		PriceObj->GetClass(), ResourcesPropertyName);
+
+	if (CostMapProp)
+	{
+		const FByteProperty* KeyByte = CastField<FByteProperty>(CostMapProp->KeyProp);
+		const FIntProperty*  ValInt  = CastField<FIntProperty>(CostMapProp->ValueProp);
+
+		if (!KeyByte || !ValInt || !KeyByte->Enum)
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("ATribeManager::Build: 'Resources' map on BP_ItemPrice has unexpected key/value types."));
+			return nullptr;
+		}
+
+		// Snapshot costs into a plain array so we can check before deducting.
+		TArray<TPair<FName, int32>> Costs;
+		{
+			FScriptMapHelper CostMap(CostMapProp,
+				CostMapProp->ContainerPtrToValuePtr<void>(PriceObj));
+			for (FScriptMapHelper::FIterator Iter(CostMap); Iter; ++Iter)
+			{
+				const uint8 EnumVal = KeyByte->GetPropertyValue(
+					CostMap.GetKeyPtr(Iter.GetInternalIndex()));
+				const FName ResType(
+					KeyByte->Enum->GetAuthoredNameStringByValue(static_cast<int64>(EnumVal)));
+				const int32 Required = ValInt->GetPropertyValue(
+					CostMap.GetValuePtr(Iter.GetInternalIndex()));
+				Costs.Emplace(ResType, Required);
+			}
+		}
+
+		// ── 3. Affordability check ────────────────────────────────────────────
+		for (const TPair<FName, int32>& Cost : Costs)
+		{
+			const int32 Available = GetResourceAmount(Cost.Key);
+			if (Available < Cost.Value)
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("ATribeManager::Build: Not enough '%s' to build '%s'. Required: %d, Available: %d."),
+					*Cost.Key.ToString(), *BuildingClass->GetName(), Cost.Value, Available);
+				return nullptr;
+			}
+		}
+
+		// ── 4. Deduct resources ───────────────────────────────────────────────
+		for (const TPair<FName, int32>& Cost : Costs)
+		{
+			DeductResourceAmount(Cost.Key, Cost.Value);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ATribeManager::Build: Price object for '%s' has no 'Resources' map. Building for free."),
+			*BuildingClass->GetName());
+	}
+
+	// ── 5. Spawn the building ─────────────────────────────────────────────────
 	return UTribeGenerator::SpawnBuilding(
 		GetWorld(),
 		this,

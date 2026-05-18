@@ -80,6 +80,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
 	TObjectPtr<AActor> TribeActor;
 
+	/**
+	 * Reference to the BP_ItemPrices object that stores per-item construction costs.
+	 * Assign the BP_ItemPrices instance in the editor or from Blueprint.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
+	TObjectPtr<UObject> ItemPrices;
+
+	/**
+	 * Name of the TMap<TSubclassOf<AActor>, BP_ItemPrice_C> property on BP_ItemPrices.
+	 * Must match the Blueprint variable name exactly (default: "Prices").
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
+	FName ItemPricesPricesPropertyName = FName(TEXT("Prices"));
+
 	// Outliner folder path for this tribe (e.g. "Tribes/Tribe_0").
 	// Passed to SpawnBuilding() so newly built actors land in the correct folder.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
@@ -104,6 +118,19 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tribe")
 	int32 GetResourceAmount(FName ResourceType) const;
+
+	/**
+	 * Looks up and returns the BP_ItemPrice_C object for the given building class
+	 * from the ItemPrices object (BP_ItemPrices). Uses UE property reflection to
+	 * read the TMap<TSubclassOf<AActor>, BP_ItemPrice_C> named ItemPricesPricesPropertyName.
+	 * Returns nullptr if ItemPrices is not set, the class is not found, or the map
+	 * property cannot be resolved.
+	 *
+	 * @param ItemClass  The building/item class to look up the price for.
+	 * @return           The BP_ItemPrice_C UObject for that class, or nullptr.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tribe")
+	UObject* GetItemPrice(TSubclassOf<AActor> ItemClass) const;
 
 	/** Main update entry point. Called every 10 seconds via timer. */
 	void Manage();
