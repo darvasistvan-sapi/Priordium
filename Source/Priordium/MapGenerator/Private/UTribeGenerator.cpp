@@ -288,6 +288,20 @@ ATribeManager* UTribeGenerator::SpawnTribeManager(
 	// Forward the resource base class from settings so the TribeManager can query nearby resources
 	TribeManager->resourceBaseClass = Settings->TribeResourceBaseClass;
 
+	// Forward the ItemPrices class so TribeManager::BeginPlay can create an instance
+	// of BP_ItemPrices and call calculatePrices() on it.
+	if (ItemPricesClass)
+	{
+		TribeManager->ItemPrices = ItemPricesClass;
+	}
+	else
+	{
+		UE_LOG(LogTribeGenerator, Warning,
+			TEXT("SpawnTribeManager: ItemPricesClass is not set on UTribeGenerator. "
+			     "TribeManager will not be able to look up item prices. "
+			     "Assign BP_ItemPrices (Content/Tribes) to the ItemPricesClass property."));
+	}
+
 	TribeManager->Tags.AddUnique(GMapGenTribeTag);
 	if (!TribeFolderPath.IsNone())
 	{

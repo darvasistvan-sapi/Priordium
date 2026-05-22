@@ -22,7 +22,8 @@ public class Priordium : ModuleRules
 			"NavigationSystem",
 			"UMG",
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"RenderCore"   // FlushRenderingCommands() used in ULandscapeBuilder::FlattenArea
 		});
 
 		if (Target.bBuildEditor)

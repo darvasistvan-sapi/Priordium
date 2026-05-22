@@ -27,6 +27,16 @@ public:
 	UTribeGenerator();
 
 	/**
+	 * The BP_ItemPrices Blueprint class.
+	 * Assign BP_ItemPrices (Content/Tribes) here in the editor.
+	 * Every TribeManager spawned by GenerateTribes() will have its
+	 * ItemPrices property set to this class so BeginPlay can create
+	 * the instance and call calculatePrices().
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Map Generator|Tribes")
+	TSubclassOf<UObject> ItemPricesClass;
+
+	/**
 	 * Generates TribeCount tribes on the map, placing them as far apart as possible
 	 * using farthest-point sampling on land cells (height > SeaLevel).
 	 * Requires that the landscape is already built (uses line traces for terrain height).

@@ -11,6 +11,7 @@
 #include "LandscapeProxy.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
 #include "AI/Navigation/NavQueryFilter.h"
 #include "TribeTask.h"
@@ -27,6 +28,25 @@ void ATribeManager::BeginPlay()
 {
     Super::BeginPlay();
 
+    // Create a live instance of the ItemPrices class and call calculatePrices()
+    // so the Blueprint function populates the Prices map before any lookup.
+    if (ItemPrices)
+    {
+        ItemPricesInstance = NewObject<UObject>(this, ItemPrices);
+        if (ItemPricesInstance)
+        {
+            // Defer calculatePrices() by one tick so all world actors are fully
+            // initialized before the Blueprint function body executes.
+            GetWorldTimerManager().SetTimerForNextTick(this, &ATribeManager::CallCalculatePrices);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("ATribeManager::BeginPlay: Failed to create ItemPrices instance from class '%s'."),
+                *ItemPrices->GetName());
+        }
+    }
+
     // Kick off the initial async path queries.
     // calculateStorageResourcePaths() will be called automatically once
     // all callbacks have fired (via the PendingPathQueries counter).
@@ -39,6 +59,25 @@ void ATribeManager::BeginPlay()
         2.f,
         /*bLoop=*/true
     );
+}
+
+void ATribeManager::CallCalculatePrices()
+{
+    if (!ItemPricesInstance) return;
+
+    UFunction* CalcFunc = ItemPricesInstance->FindFunction(TEXT("calculatePrices"));
+    if (CalcFunc)
+    {
+        void* Params = FMemory_Alloca(FMath::Max<int32>(CalcFunc->ParmsSize, 1));
+        FMemory::Memzero(Params, CalcFunc->ParmsSize);
+        ItemPricesInstance->ProcessEvent(CalcFunc, Params);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("ATribeManager::CallCalculatePrices: calculatePrices() not found on '%s'."),
+            *ItemPricesInstance->GetClass()->GetName());
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +139,215 @@ int32 ATribeManager::GetResourceAmount(FName ResourceType) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Resource census near an arbitrary world location
+// ─────────────────────────────────────────────────────────────────────────────
+
+TMap<FName, int32> ATribeManager::CountResourcesNearLocation(FVector Location) const
+{
+	TMap<FName, int32> Result;
+
+	UWorld* World = GetWorld();
+	if (!World || !resourceBaseClass)
+	{
+		return Result;
+	}
+
+	// 100 m in Unreal units (1 UU = 1 cm)
+	static constexpr float SearchRadiusSq         = 5000.f * 5000.f;
+	static constexpr float StorageExclusionRadiusSq = 10000.f * 10000.f;
+
+	// Snapshot storage positions once so the inner loop stays cache-friendly.
+	TArray<FVector> StorageLocations;
+	StorageLocations.Reserve(storages.Num());
+	for (const TObjectPtr<AActor>& StoragePtr : storages)
+	{
+		if (const AActor* Storage = StoragePtr.Get())
+		{
+			StorageLocations.Add(Storage->GetActorLocation());
+		}
+	}
+
+	// Collect all BP_Resource instances in the world.
+	TArray<AActor*> AllResources;
+	UGameplayStatics::GetAllActorsOfClass(World, resourceBaseClass, AllResources);
+
+	for (const AActor* Resource : AllResources)
+	{
+		if (!Resource) continue;
+
+		const FVector ResourceLoc = Resource->GetActorLocation();
+		const float DistSq = FVector::DistSquared(ResourceLoc, Location);
+
+		// ── 1. Must be within search radius of Location ───────────────────────
+		if (DistSq > SearchRadiusSq)
+		{
+			continue;
+		}
+
+		// ── 2. Must NOT be within 100 m of any storage ────────────────────────
+		bool bNearStorage = false;
+		for (const FVector& StorageLoc : StorageLocations)
+		{
+			if (FVector::DistSquared(ResourceLoc, StorageLoc) < StorageExclusionRadiusSq)
+			{
+				bNearStorage = true;
+				break;
+			}
+		}
+		if (bNearStorage) continue;
+
+		// ── 3. Read the E_ResourceType enum property via reflection ───────────
+		const FByteProperty* TypeProp =
+			FindFProperty<FByteProperty>(Resource->GetClass(), ResourceTypePropertyName);
+		if (!TypeProp || !TypeProp->Enum)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ATribeManager::CountResourcesNearLocation: "
+				     "  -> skipped: property '%s' not found or not an enum on '%s'."),
+				*ResourceTypePropertyName.ToString(),
+				*Resource->GetClass()->GetName());
+			continue;
+		}
+
+		const uint8 EnumVal  = TypeProp->GetPropertyValue_InContainer(Resource);
+		const FName TypeName(TypeProp->Enum->GetAuthoredNameStringByValue(
+		                         static_cast<int64>(EnumVal)));
+
+		// ── 4. Read the ResourceAmount int32 property and accumulate ──────────
+		const FIntProperty* AmountProp =
+			FindFProperty<FIntProperty>(Resource->GetClass(), ResourceAmountPropertyName);
+		if (!AmountProp)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("ATribeManager::CountResourcesNearLocation: "
+				     "  -> skipped: property '%s' not found on '%s'."),
+				*ResourceAmountPropertyName.ToString(),
+				*Resource->GetClass()->GetName());
+			continue;
+		}
+
+		const int32 Amount = AmountProp->GetPropertyValue_InContainer(Resource);
+		if (Amount > 0)
+		{
+			Result.FindOrAdd(TypeName) += Amount;
+		}
+	}
+
+	return Result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Best resource location search
+// ─────────────────────────────────────────────────────────────────────────────
+
+TArray<FResourceLocationCandidate> ATribeManager::FindLocationsWithResources() const
+{
+	// All distances in Unreal units (1 UU = 1 cm).
+	static constexpr float GridStep         =  1000.f;            // 10 m
+	static constexpr float MinStorageDistSq = 10000.f * 10000.f;  // 100 m – must be outside
+	static constexpr float MaxStorageDistSq = 20000.f * 20000.f;  // 200 m – must be inside
+	static constexpr int32 Steps            = 10;                  // ±10 steps × 10 m = ±100 m
+
+	TArray<FResourceLocationCandidate> Result;
+
+	// ── Snapshot storage world positions ──────────────────────────────────────
+	TArray<FVector> StorageLocations;
+	StorageLocations.Reserve(storages.Num());
+	for (const TObjectPtr<AActor>& StoragePtr : storages)
+	{
+		if (const AActor* Storage = StoragePtr.Get())
+		{
+			StorageLocations.Add(Storage->GetActorLocation());
+		}
+	}
+
+	if (StorageLocations.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ATribeManager::FindLocationsWithResources: No storages registered."));
+		return Result;
+	}
+
+	// ── Generate and evaluate grid candidates ─────────────────────────────────
+	// Each storage contributes a local ±200 m grid. A TSet of quantized grid
+	// indices prevents evaluating the same world point more than once when
+	// storage grids overlap.
+	TSet<FIntVector> Visited;
+	Visited.Reserve(StorageLocations.Num() * (2 * Steps + 1) * (2 * Steps + 1));
+
+	for (const FVector& StorageLoc : StorageLocations)
+	{
+		for (int32 DY = -Steps; DY <= Steps; ++DY)
+		{
+			for (int32 DX = -Steps; DX <= Steps; ++DX)
+			{
+				const FVector Candidate(
+					StorageLoc.X + DX * GridStep,
+					StorageLoc.Y + DY * GridStep,
+					StorageLoc.Z);  // Z approximated to the generating storage's height
+
+				// Deduplicate: quantise to 20 m grid indices.
+				const FIntVector GridIdx(
+					FMath::RoundToInt(Candidate.X / GridStep),
+					FMath::RoundToInt(Candidate.Y / GridStep),
+					0);
+
+				bool bAlreadyVisited;
+				Visited.Add(GridIdx, &bAlreadyVisited);
+				if (bAlreadyVisited) continue;
+
+				// ── Filter: ≥100 m from ALL storages, ≤200 m from AT LEAST ONE ──
+				bool bTooClose    = false;
+				bool bWithinRange = false;
+
+				for (const FVector& SLoc : StorageLocations)
+				{
+					const float DistSq = FVector::DistSquared(Candidate, SLoc);
+					if (DistSq < MinStorageDistSq)
+					{
+						bTooClose = true;
+						break;
+					}
+					if (DistSq <= MaxStorageDistSq)
+					{
+						bWithinRange = true;
+					}
+				}
+
+				if (bTooClose || !bWithinRange) continue;
+
+				// ── Count resources and build the entry ────────────────────────
+				FResourceLocationCandidate Entry;
+				Entry.Location  = Candidate;
+				Entry.Resources = CountResourcesNearLocation(Candidate);
+
+				for (const TPair<FName, int32>& Pair : Entry.Resources)
+				{
+					Entry.TotalCount += Pair.Value;
+				}
+
+				Result.Add(MoveTemp(Entry));
+			}
+		}
+	}
+
+	// ── Sort descending by TotalCount (most resources first) ──────────────────
+	Result.Sort([](const FResourceLocationCandidate& A, const FResourceLocationCandidate& B)
+	{
+		return A.TotalCount > B.TotalCount;
+	});
+
+	UE_LOG(LogTemp, Log,
+		TEXT("ATribeManager::FindLocationsWithResources: %d candidates evaluated, "
+		     "%d valid points returned (best: %d resources)."),
+		Visited.Num(),
+		Result.Num(),
+		Result.IsEmpty() ? 0 : Result[0].TotalCount);
+
+	return Result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Item price lookup
 // Resolves the FMapProperty (key = FClassProperty, value = FObjectProperty)
 // named ItemPricesPricesPropertyName on the ItemPrices object and returns the
@@ -108,9 +356,9 @@ int32 ATribeManager::GetResourceAmount(FName ResourceType) const
 
 UObject* ATribeManager::GetItemPrice(TSubclassOf<AActor> ItemClass) const
 {
-	if (!ItemPrices)
+	if (!ItemPricesInstance)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ATribeManager::GetItemPrice: ItemPrices is not set."));
+		UE_LOG(LogTemp, Warning, TEXT("ATribeManager::GetItemPrice: ItemPricesInstance is null (was ItemPrices set before BeginPlay?)."));
 		return nullptr;
 	}
 	if (!ItemClass)
@@ -120,13 +368,13 @@ UObject* ATribeManager::GetItemPrice(TSubclassOf<AActor> ItemClass) const
 	}
 
 	FMapProperty* MapProp = FindFProperty<FMapProperty>(
-		ItemPrices->GetClass(), ItemPricesPricesPropertyName);
+		ItemPricesInstance->GetClass(), ItemPricesPricesPropertyName);
 	if (!MapProp)
 	{
 		UE_LOG(LogTemp, Warning,
 			TEXT("ATribeManager::GetItemPrice: Could not find map property '%s' on '%s'."),
 			*ItemPricesPricesPropertyName.ToString(),
-			*ItemPrices->GetClass()->GetName());
+			*ItemPricesInstance->GetClass()->GetName());
 		return nullptr;
 	}
 
@@ -135,14 +383,18 @@ UObject* ATribeManager::GetItemPrice(TSubclassOf<AActor> ItemClass) const
 	if (!KeyProp || !ValProp)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("ATribeManager::GetItemPrice: Map property '%s' has unexpected key/value types."),
-			*ItemPricesPricesPropertyName.ToString());
+			TEXT("ATribeManager::GetItemPrice: Map property '%s' has unexpected key/value types (key=%s, value=%s)."),
+			*ItemPricesPricesPropertyName.ToString(),
+			*MapProp->KeyProp->GetClass()->GetName(),
+			*MapProp->ValueProp->GetClass()->GetName());
 		return nullptr;
 	}
 
-	FScriptMapHelper MapHelper(MapProp, MapProp->ContainerPtrToValuePtr<void>(ItemPrices.Get()));
+	FScriptMapHelper MapHelper(MapProp, MapProp->ContainerPtrToValuePtr<void>(ItemPricesInstance.Get()));
 	for (FScriptMapHelper::FIterator Iter(MapHelper); Iter; ++Iter)
 	{
+		UE_LOG(LogTemp, Log,
+			TEXT("ATribeManager::GetItemPrice: Checking price entry %d..."), MapHelper.GetMaxIndex());
 		const UClass* StoredClass = Cast<UClass>(
 			KeyProp->GetPropertyValue(MapHelper.GetKeyPtr(Iter.GetInternalIndex())));
 		if (StoredClass == ItemClass)
@@ -319,18 +571,18 @@ bool ATribeManager::FindFreeBuildLocation(FVector& OutLocation) const
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	if (!NavSys) return false;
 
-	// Collect existing storage positions as search centres.
-	TArray<FVector> Centers;
-	for (const TObjectPtr<AActor>& S : storages)
-	{
-		if (S) Centers.Add(S->GetActorLocation());
-	}
-	if (Centers.IsEmpty()) return false;
+	// Candidate points sorted by resource richness (most resources first).
+	// Each point already satisfies the 100 m / 200 m storage-distance constraints.
+	const TArray<FResourceLocationCandidate> Candidates = FindLocationsWithResources();
 
-	static constexpr int32 MaxAttempts = 30;
-	static constexpr float MaxRadius   =  10000.f;  // 1 km in cm
-	static constexpr float MinRadius   =   2000.f;  // min 20 m from the centre storage
-	static constexpr float ClearRadius =    500.f;  // must be free within 5 m
+	if (Candidates.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ATribeManager::FindFreeBuildLocation: FindLocationsWithResources returned no candidates."));
+		return false;
+	}
+
+	static constexpr float ClearRadius = 500.f;   // 5 m clearance sphere
 
 	// Object types to overlap-test against: static scenery, dynamic actors, pawns.
 	const TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes =
@@ -345,34 +597,28 @@ bool ATribeManager::FindFreeBuildLocation(FVector& OutLocation) const
 
 	const FVector NavExtent(500.f, 500.f, 5000.f);
 
-	for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
+	// Iterate candidates best-first; return the first one that lies on the navmesh
+	// and has no blocking actors within the clearance radius.
+	for (const FResourceLocationCandidate& Entry : Candidates)
 	{
-		// Pick a random storage as the centre.
-		const FVector Center = Centers[FMath::RandRange(0, Centers.Num() - 1)];
+		// Lift the candidate 5000 cm upward so ProjectPointToNavigation can snap
+		// downward to the actual terrain surface regardless of the stored Z.
+		const FVector Elevated(Entry.Location.X, Entry.Location.Y, Entry.Location.Z + 5000.f);
 
-		// Random point in an annulus [MinRadius, MaxRadius] around the centre.
-		const float Angle = FMath::FRandRange(0.f, 2.f * PI);
-		const float Dist  = FMath::FRandRange(MinRadius, MaxRadius);
-		const FVector Candidate(
-			Center.X + FMath::Cos(Angle) * Dist,
-			Center.Y + FMath::Sin(Angle) * Dist,
-			Center.Z + 5000.f);   // start high so the navmesh snap goes downward
-
-		// Must land on the navigation mesh.
 		FNavLocation NavLoc;
-		if (!NavSys->ProjectPointToNavigation(Candidate, NavLoc, NavExtent)) {
+		if (!NavSys->ProjectPointToNavigation(Elevated, NavLoc, NavExtent))
+		{
 			continue;
 		}
 
-		// Raise the overlap sphere 150 cm above the surface to reduce false hits,
-		// then explicitly strip the landscape before evaluating the result.
+		// Raise the overlap sphere 150 cm above the surface to reduce false hits
+		// against the landscape mesh, then strip remaining landscape hits.
 		TArray<AActor*> HitActors;
 		const FVector CheckPos = NavLoc.Location + FVector(0.f, 0.f, 150.f);
 		UKismetSystemLibrary::SphereOverlapActors(
 			World, CheckPos, ClearRadius,
 			ObjectTypes, nullptr, IgnoreActors, HitActors);
 
-		// The landscape is always present under every valid navmesh point — ignore it.
 		HitActors.RemoveAll([](const AActor* A)
 		{
 			return !A || A->IsA<ALandscapeProxy>();
@@ -381,12 +627,17 @@ bool ATribeManager::FindFreeBuildLocation(FVector& OutLocation) const
 		if (!HitActors.IsEmpty()) continue;
 
 		OutLocation = NavLoc.Location;
+		UE_LOG(LogTemp, Log,
+			TEXT("ATribeManager::FindFreeBuildLocation: Chose (%.0f, %.0f, %.0f) "
+			     "with %d nearby resource(s)."),
+			OutLocation.X, OutLocation.Y, OutLocation.Z, Entry.TotalCount);
 		return true;
 	}
 
 	UE_LOG(LogTemp, Warning,
-		TEXT("ATribeManager::FindFreeBuildLocation: No free build spot found after %d attempts."),
-		MaxAttempts);
+		TEXT("ATribeManager::FindFreeBuildLocation: No free build spot found "
+		     "among %d candidate(s)."),
+		Candidates.Num());
 	return false;
 }
 

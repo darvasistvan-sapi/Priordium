@@ -22,6 +22,29 @@ struct FStorageResourcePath
 	float PathLength = 0.f;
 };
 
+/**
+ * One entry in the sorted result of FindLocationsWithResources().
+ * Holds the candidate world position, a per-type resource breakdown,
+ * and the pre-computed total so sorting does not need to re-sum.
+ */
+USTRUCT(BlueprintType)
+struct FResourceLocationCandidate
+{
+	GENERATED_BODY()
+
+	/** World position of the grid point. */
+	UPROPERTY(BlueprintReadOnly, Category = "Tribe")
+	FVector Location = FVector::ZeroVector;
+
+	/** Number of resource actors per resource type near this location. */
+	UPROPERTY(BlueprintReadOnly, Category = "Tribe")
+	TMap<FName, int32> Resources;
+
+	/** Sum of all values in Resources — used for sorting. */
+	UPROPERTY(BlueprintReadOnly, Category = "Tribe")
+	int32 TotalCount = 0;
+};
+
 UCLASS()
 class PRIORDIUM_API ATribeManager : public AActor
 {
@@ -55,6 +78,21 @@ public:
 	FName StorageInventoryPropertyName = FName(TEXT("StoredResources"));
 
 	/**
+	 * Name of the E_ResourceType property on BP_Resource actors.
+	 * Must match the Blueprint variable name exactly.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
+	FName ResourceTypePropertyName = FName(TEXT("Type"));
+
+	/**
+	 * Name of the int32 amount property on BP_Resource actors.
+	 * CountResourcesNearLocation sums this value instead of counting actors.
+	 * Must match the Blueprint variable name exactly.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
+	FName ResourceAmountPropertyName = FName(TEXT("ResourceAmount"));
+
+	/**
 	 * Authored name of the wood / timber entry in E_ResourceType.
 	 * Used by Build() to check and deduct the construction cost.
 	 */
@@ -81,11 +119,11 @@ public:
 	TObjectPtr<AActor> TribeActor;
 
 	/**
-	 * Reference to the BP_ItemPrices object that stores per-item construction costs.
-	 * Assign the BP_ItemPrices instance in the editor or from Blueprint.
+	 * The BP_ItemPrices Blueprint class. TribeManager creates one instance from it
+	 * at BeginPlay and uses that instance for all GetItemPrice() lookups.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
-	TObjectPtr<UObject> ItemPrices;
+	TSubclassOf<UObject> ItemPrices;
 
 	/**
 	 * Name of the TMap<TSubclassOf<AActor>, BP_ItemPrice_C> property on BP_ItemPrices.
@@ -118,6 +156,32 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Tribe")
 	int32 GetResourceAmount(FName ResourceType) const;
+
+	/**
+	 * Counts all BP_Resource actors within 100 m of Location, grouped by resource type.
+	 * Resources that lie within 100 m of any storage are excluded — they are already
+	 * "covered" by an existing storage and should not be double-counted.
+	 * Uses ResourceTypePropertyName to read the E_ResourceType enum from each resource actor.
+	 *
+	 * @param Location  World position to search around (XYZ, distance is 3-D).
+	 * @return          Map of authored resource-type name → count of actors of that type.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tribe")
+	TMap<FName, int32> CountResourcesNearLocation(FVector Location) const;
+
+	/**
+	 * Scans a 20 m grid around all existing storages and returns every valid candidate
+	 * point sorted descending by total resource count (most resources first).
+	 *
+	 * Candidate points must satisfy both:
+	 *   • within  200 m of at least one storage  (reachable from an existing base)
+	 *   • at least 100 m from every storage       (not already served by an existing storage)
+	 *
+	 * Points with zero resources are included at the end of the list (TotalCount == 0).
+	 * Returns an empty array if there are no storages or no valid grid points.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Tribe")
+	TArray<FResourceLocationCandidate> FindLocationsWithResources() const;
 
 	/**
 	 * Looks up and returns the BP_ItemPrice_C object for the given building class
@@ -156,6 +220,10 @@ protected:
 
 private:
 
+
+	// Instance created from ItemPrices class at BeginPlay.
+	UPROPERTY()
+	TObjectPtr<UObject> ItemPricesInstance;
 
 	// TribeMan -> their current task
 	TMap<TObjectPtr<ACharacter>, TSharedPtr<TribeTask>> tribeManTasks;
@@ -232,6 +300,9 @@ private:
 	 * after reaching a destination or being interrupted.
 	 */
 	void resumeIdleTribeManTasks();
+
+	/** Deferred one-tick callback that calls calculatePrices() on ItemPricesInstance. */
+	void CallCalculatePrices();
 
 	ACharacter* getFreeTribeMan() const;
 	AActor* getNearestResource(TSubclassOf<AActor> ResourceType) const;

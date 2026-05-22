@@ -16,6 +16,7 @@
 #include "UObject/UnrealType.h"
 
 #include "LandscapeComponent.h"       // ELandscapeLayerUpdateMode (runtime header, needed for FlattenArea)
+#include "RenderCommandFence.h"       // FlushRenderingCommands() – forces render thread sync after GPU texture uploads
 
 #if WITH_EDITOR
 #include "LandscapeEdit.h"
@@ -420,18 +421,14 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 	TArray<uint16> HeightData;
 	HeightData.SetNumZeroed(SizeX * SizeY);
 
-	// Determine execution context upfront
-	UWorld* World = GetWorld();
-	const bool bIsEditor = World && (World->WorldType == EWorldType::Editor);
-	const bool bIsPIE    = World && (World->WorldType == EWorldType::PIE);
-
-	// Use appropriate heightmap access based on context
 #if WITH_EDITOR
-	FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
+	UWorld* World = GetWorld();
+	const bool bIsEditorWorld = World && World->WorldType == EWorldType::Editor;
 
-	if (bIsEditor)
+	// ─── EDITOR: write through the edit-layer system (non-destructive, persists) ──
+	if (bIsEditorWorld)
 	{
-		// Editor: use scoped edit layer for proper persistence
+		// Determine which edit layer to target (layer 0 = base layer from the import).
 		FGuid BaseLayerGuid;
 		if (Landscape->GetLayersConst().Num() > 0)
 		{
@@ -441,70 +438,87 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 				{
 					BaseLayerGuid = BaseLayer->EditLayer->GetGuid();
 					UE_LOG(LogLandscapeBuilder, Log,
-						TEXT("FlattenArea (Editor): targeting edit layer '%s' (guid %s)."),
+						TEXT("FlattenArea: targeting edit layer '%s' (guid %s)."),
 						*BaseLayer->EditLayer->GetName().ToString(),
 						*BaseLayerGuid.ToString());
 				}
 			}
 		}
 
-		FScopedSetLandscapeEditingLayer ScopedLayer(Landscape, BaseLayerGuid, [Landscape]()
+		// GetHeightData AND SetHeightData must be in the same FScopedSetLandscapeEditingLayer
+		// so both target the same layer. The lambda fires on scope exit and queues the GPU
+		// recomposition of all layers into the final heightmap.
 		{
-			Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All);
-		});
+			FScopedSetLandscapeEditingLayer ScopedLayer(Landscape, BaseLayerGuid, [Landscape]()
+			{
+				Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All);
+			});
 
+			FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
+			LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
+
+			uint16 MinHeight = TNumericLimits<uint16>::Max();
+			for (const uint16 H : HeightData)
+			{
+				if (H > 0) MinHeight = FMath::Min(MinHeight, H);
+			}
+
+			if (MinHeight == TNumericLimits<uint16>::Max())
+			{
+				UE_LOG(LogLandscapeBuilder, Warning,
+					TEXT("FlattenArea: GetHeightData returned only zeroes -- layer GUID may be wrong."));
+				return;
+			}
+
+			for (uint16& H : HeightData) { H = MinHeight; }
+
+			LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY,
+				HeightData.GetData(), 0, /*CalcNormals=*/true);
+
+			UE_LOG(LogLandscapeBuilder, Display,
+				TEXT("FlattenArea: vertices [%d,%d]-[%d,%d] (%dx%d) flattened to uint16=%d."),
+				MinVertX, MinVertY, MaxVertX, MaxVertY, SizeX, SizeY, MinHeight);
+
+		} // ~FScopedSetLandscapeEditingLayer → RequestLayersContentUpdate fires here
+
+		Landscape->MarkPackageDirty();
+	}
+	// ─── PIE: bypass the async layer pipeline, write directly to the composited
+	//          heightmap so the change is immediately visible without waiting for
+	//          the editor's deferred layer-recomposition tick. ──────────────────
+	else
+	{
+		// Without FScopedSetLandscapeEditingLayer the edit-data interface operates
+		// on the raw / composited heightmap texture (the final rendered data) rather
+		// than a source edit-layer texture, giving us an immediate CPU-side write.
+		FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
 		LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
-	}
-	else if (bIsPIE)
-	{
-		// PIE: skip edit layer scope entirely, access heightmap directly
-		// Using empty GUID to access the heightmap without edit layer context
-		LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
-		UE_LOG(LogLandscapeBuilder, Display, TEXT("FlattenArea (PIE): reading heightmap without edit layer context."));
-	}
-#else
-	FLandscapeEditDataInterface LandscapeEdit(LandscapeInfo);
-	LandscapeEdit.GetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0);
-#endif
 
-	// Find the minimum height across the footprint (ignore 0 -- uninitialized sentinel)
-	uint16 MinHeight = TNumericLimits<uint16>::Max();
-	for (const uint16 H : HeightData)
-	{
-		if (H > 0) MinHeight = FMath::Min(MinHeight, H);
-	}
+		uint16 MinHeight = TNumericLimits<uint16>::Max();
+		for (const uint16 H : HeightData)
+		{
+			if (H > 0) MinHeight = FMath::Min(MinHeight, H);
+		}
 
-	if (MinHeight == TNumericLimits<uint16>::Max())
-	{
-		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GetHeightData returned only zeroes -- landscape may not be initialized."));
-		return;
+		if (MinHeight == TNumericLimits<uint16>::Max())
+		{
+			UE_LOG(LogLandscapeBuilder, Warning,
+				TEXT("FlattenArea (PIE): GetHeightData returned only zeroes."));
+			return;
+		}
+
+		for (uint16& H : HeightData) { H = MinHeight; }
+
+		LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY,
+			HeightData.GetData(), 0, /*CalcNormals=*/true);
 	}
 
-	// Flatten all vertices to the minimum height
-	for (uint16& H : HeightData)
-	{
-		H = MinHeight;
-	}
-
-	// Write the flattened heights back
-	LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY, HeightData.GetData(), 0, /*CalcNormals=*/true);
-
-	UE_LOG(LogLandscapeBuilder, Display,
-		TEXT("FlattenArea: vertices [%d,%d]-[%d,%d] (%dx%d) flattened to uint16=%d."),
-		MinVertX, MinVertY, MaxVertX, MaxVertY, SizeX, SizeY, MinHeight);
-
-	// Trigger GPU recomposition and collision update for both contexts
-	Landscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All);
-	
-	if (bIsPIE)
-	{
-		UE_LOG(LogLandscapeBuilder, Display, TEXT("FlattenArea (PIE): GPU recomposition requested without edit layer scope."));
-	}
-
-	// RequestLayersContentUpdate queues a deferred GPU recomposition — the physics
-	// collision mesh is NOT rebuilt synchronously. Explicitly recreate collision on
-	// every landscape component that overlaps the modified vertex rectangle so the
-	// terrain is physically solid at the correct height in both editor and PIE.
+	// ─── Both paths: force GPU texture re-upload and collision rebuild ─────────
+	// After the CPU-side write (either via edit layer or direct), re-upload the
+	// composited heightmap texture to the GPU and invalidate the render state so
+	// the mesh is reconstructed immediately. FlushRenderingCommands() blocks until
+	// the render thread has processed all uploads — guaranteeing PIE sees the
+	// correct terrain on the very next rendered frame.
 	for (ULandscapeComponent* Component : Landscape->LandscapeComponents)
 	{
 		if (!Component) continue;
@@ -520,20 +534,18 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 			continue;
 		}
 
-		// RequestHeightmapUpdate re-reads the heightmap texture and rebuilds
-		// both the render data and the physics collision mesh for this component.
-		// bUpdateAll=false limits the update to dirty regions; bUpdateCollision=true
-		// ensures the physics heightfield is rebuilt (critical for PIE correctness).
 		Component->RequestHeightmapUpdate(/*bUpdateAll=*/false, /*bUpdateCollision=*/true);
+
+		if (UTexture2D* HeightmapTex = Component->GetHeightmap())
+		{
+			HeightmapTex->UpdateResource();
+		}
+
+		Component->MarkRenderStateDirty();
 	}
 
-	// Mark the asset dirty only in the pure editor world so the change persists
-	// after the session. In PIE the landscape is a transient duplicate and marking
-	// it dirty would incorrectly prompt a save on PIE end.
-	if (World && World->WorldType == EWorldType::Editor)
-	{
-		Landscape->MarkPackageDirty();
-	}
+	FlushRenderingCommands();
+#endif
 }
 
 TArray<uint16> ULandscapeBuilder::ConvertHeightmapToUint16(const TArray<float>& Heightmap) const
