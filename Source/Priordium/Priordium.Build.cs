@@ -20,6 +20,7 @@ public class Priordium : ModuleRules
 			"Water",
 			"GameplayTags",
 			"NavigationSystem",
+			"AIModule",
 			"UMG",
 			"Slate",
 			"SlateCore",
@@ -43,7 +44,8 @@ public class Priordium : ModuleRules
 		{
 			ModuleDirectory + "/MapGenerator/Public",
 			ModuleDirectory + "/Tribe",
-			ModuleDirectory + "/UI"
+			ModuleDirectory + "/UI",
+			ModuleDirectory + "/Quest"
 		});
 
 		string FastNoisePath = Path.Combine(ModuleDirectory, "../../Source/ThirdParty/FastNoise");

@@ -16,6 +16,7 @@ class UHeightmapGenerator;
 class UMapGeneratorSettings;
 class ULandscapeBuilder;
 class ATribeManager;
+class AQuestManager;
 
 UCLASS(ClassGroup = (MapGenerator), meta = (BlueprintSpawnableComponent))
 class PRIORDIUM_API UTribeGenerator : public UActorComponent
@@ -95,6 +96,37 @@ public:
 		ULandscapeBuilder*           LandscapeBuilder = nullptr,
 		AActor*                      TribeActor       = nullptr,
 		const FName&                 FolderPath       = NAME_None);
+
+	/**
+	 * Spawns Count TribeMen evenly distributed in a circle of SpawnRadius around
+	 * CenterLocation and registers each one with TribeManager.
+	 *
+	 * Shared by GenerateTribes() (generation time, N men in a circle) and
+	 * ATribeManager::CreateTribeMan() (runtime, Count=1 / Radius=0).
+	 *
+	 * @param World           World to spawn in.
+	 * @param TribeManager    Manager that will own the spawned characters.
+	 * @param CenterLocation  Centre of the spawn circle (Z corrected via Heightmap when provided).
+	 * @param TribeManClass   Character class to spawn.
+	 * @param Count           Number of TribeMen to spawn.
+	 * @param SpawnRadius     Radius of the spawn circle in cm (0 = spawn at centre).
+	 * @param TribeActor      Optional – sets the "Tribe" property on each spawned actor.
+	 * @param FolderPath      Optional – Outliner folder for spawned actors.
+	 * @param Heightmap       Optional – used to snap Z to the terrain surface.
+	 * @param Settings        Optional – required when Heightmap is provided.
+	 * @return Array of successfully spawned ACharacter pointers (may be shorter than Count on partial failure).
+	 */
+	static TArray<ACharacter*> SpawnTribeMen(
+		UWorld*                      World,
+		ATribeManager*               TribeManager,
+		const FVector&               CenterLocation,
+		TSubclassOf<AActor>          TribeManClass,
+		int32                        Count,
+		float                        SpawnRadius,
+		AActor*                      TribeActor      = nullptr,
+		const FName&                 FolderPath      = NAME_None,
+		const UHeightmapGenerator*   Heightmap       = nullptr,
+		const UMapGeneratorSettings* Settings        = nullptr);
 
 private:
 
@@ -195,24 +227,4 @@ private:
 		const FName&                 TribeFolderPath,
 		ULandscapeBuilder*           LandscapeBuilder);
 
-	/**
-	 * Spawns TribeMen in a circle around the given location.
-	 * @param World           The world to spawn in
-	 * @param TribeManager    The TribeManager to register TribeMen with
-	 * @param CenterLocation  The center point for the circle
-	 * @param Settings        Generation settings with TribeMan configuration
-	 * @param SpawnParams     Actor spawn parameters
-	 * @param Heightmap       Optional heightmap for terrain-height fallback sampling
-	 * @param TribeActor      The owning tribe actor (BP_Tribe) for Tribe property references
-	 * @param TribeFolderPath Outliner folder path for organization
-	 */
-	void SpawnTribeMen(
-		UWorld*                      World,
-		ATribeManager*               TribeManager,
-		const FVector&               CenterLocation,
-		const UMapGeneratorSettings* Settings,
-		const FActorSpawnParameters& SpawnParams,
-		const UHeightmapGenerator*   Heightmap,
-		AActor*                      TribeActor,
-		const FName&                 TribeFolderPath);
 };

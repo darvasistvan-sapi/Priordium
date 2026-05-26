@@ -6,6 +6,7 @@
 #include "UWaterSystemBuilder.h"
 #include "UHeightmapGenerator.h"
 #include "UMapGeneratorSettings.h"
+#include "GameFramework/Actor.h"
 #include "WaterZoneSpawnUtils.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
@@ -1205,7 +1206,9 @@ void UWaterSystemBuilder::SpawnWaterBodiesRuntime(const UHeightmapGenerator* Hei
 		// zone accumulates all registered bodies progressively.
 		if (IsValid(Zone) && IsValid(Spawned))
 		{
+#if WITH_EDITOR
 			Zone->RerunConstructionScripts();
+#endif
 			WaterZoneSpawnUtils::MakeActorComponentsMovable(Zone);
 
 			UFunction* ForceRebuildFn = Zone->FindFunction(TEXT("ForceUpdateWaterInfoTexture"));
@@ -1354,7 +1357,7 @@ void UWaterSystemBuilder::MergeOverlappingWaterZones(UWorld* World)
 
 				UE_LOG(LogWaterSystem, Display,
 					TEXT("MergeOverlappingWaterZones -- merged '%s' into '%s'. New extent=(%.0f, %.0f) cm."),
-					*DyingZone->GetActorLabel(), *SurvivingZone->GetActorLabel(),
+					*DyingZone->GetActorNameOrLabel(), *SurvivingZone->GetActorNameOrLabel(),
 					NewExtent.X, NewExtent.Y);
 
 				// ----- Destroy the dying zone and remove from local list -----
@@ -1402,7 +1405,9 @@ void UWaterSystemBuilder::MergeOverlappingWaterZones(UWorld* World)
 	// Step 1 -- reset zone internal state.
 	for (AActor* Zone : SurvivingZones)
 	{
+#if WITH_EDITOR
 		Zone->RerunConstructionScripts();
+#endif
 		WaterZoneSpawnUtils::MakeActorComponentsMovable(Zone);
 	}
 
@@ -1422,7 +1427,9 @@ void UWaterSystemBuilder::MergeOverlappingWaterZones(UWorld* World)
 			LinkZoneOnObject(WComp, Zone);
 		}
 
+#if WITH_EDITOR
 		Body->RerunConstructionScripts();
+#endif
 		WaterZoneSpawnUtils::MakeActorComponentsMovable(Body);
 
 		if (UWaterBodyComponent* WComp = Body->FindComponentByClass<UWaterBodyComponent>())
@@ -1441,7 +1448,9 @@ void UWaterSystemBuilder::MergeOverlappingWaterZones(UWorld* World)
 	// Step 4 & 5 -- force zone to regenerate its water info texture.
 	for (AActor* Zone : SurvivingZones)
 	{
+#if WITH_EDITOR
 		Zone->RerunConstructionScripts();
+#endif
 		WaterZoneSpawnUtils::MakeActorComponentsMovable(Zone);
 
 		UFunction* ForceRebuildFn = Zone->FindFunction(TEXT("ForceUpdateWaterInfoTexture"));
@@ -1861,7 +1870,9 @@ void UWaterSystemBuilder::RebuildWaterZone(UWorld* World) const
 		else
 		{
 			// Fallback: rerun construction scripts (less reliable but better than nothing)
+#if WITH_EDITOR
 			Zone->RerunConstructionScripts();
+#endif
 			UE_LOG(LogWaterSystem, Warning,
 				TEXT("RebuildWaterZone -- ForceUpdateWaterInfoTexture not found on %s, fell back to RerunConstructionScripts."),
 				*Zone->GetName());
@@ -2066,7 +2077,9 @@ AActor* UWaterSystemBuilder::SpawnWaterBody(UWorld* World, const FWaterBodyDefin
 	}
 	else
 	{
+#if WITH_EDITOR
 		Actor->RerunConstructionScripts();
+#endif
 		UE_LOG(LogWaterSystem, Warning,
 			TEXT("SpawnWaterBody -- WaterBodyComponent not found, falling back to RerunConstructionScripts."));
 	}
@@ -2104,7 +2117,9 @@ AActor* UWaterSystemBuilder::SpawnWaterBody(UWorld* World, const FWaterBodyDefin
 	{
 		// Re-run construction scripts so OnConstruction fires again with the
 		// zone override already set → the water body registers itself with the zone.
+#if WITH_EDITOR
 		Actor->RerunConstructionScripts();
+#endif
 		WaterZoneSpawnUtils::MakeActorComponentsMovable(Actor);
 
 		if (UWaterBodyComponent* WaterComp = Actor->FindComponentByClass<UWaterBodyComponent>())

@@ -107,11 +107,10 @@ private:
 
 	/**
 	 * Builds a single tribe row and appends it to TribeListBox.
-	 * @param TribeManager  The tribe's manager (for storage access).
+	 * @param TribeManager  The tribe's manager (for storage access and label).
 	 * @param TribeColor    Colour read from the BP_Tribe actor.
-	 * @param TribeIndex    Zero-based index used in the row label.
 	 */
-	void AddTribeRow(ATribeManager* TribeManager, const FLinearColor& TribeColor, int32 TribeIndex);
+	void AddTribeRow(ATribeManager* TribeManager, const FLinearColor& TribeColor);
 
 	/**
 	 * Reads the TMap<FName, int32> property named StorageInventoryPropertyName

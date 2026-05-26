@@ -265,6 +265,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tribes",
 		meta = (ToolTip = "Resource base class assigned to each TribeManager. Assign BP_Resource."))
 	TSubclassOf<AActor> TribeResourceBaseClass;
+
+	// -------------------------------------------------------------------------
+	// Quests
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Resource type names that can appear in randomly generated quests.
+	 * Must match the authored E_ResourceType enum entry names exactly
+	 * (e.g. "Wood", "RaspBerry").
+	 * Forwarded to QuestManager->PossibleResourceTypes at generation time.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Quests",
+		meta = (ToolTip = "Resource type names available for quest generation. Must match E_ResourceType enum entry names exactly (e.g. Wood, RaspBerry)."))
+	TArray<FName> QuestPossibleResourceTypes;
 };
 
 

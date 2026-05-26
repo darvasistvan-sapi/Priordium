@@ -38,6 +38,16 @@ public:
 
 	UResourceDistributor();
 
+	/**
+	 * Minimum distance (in cm) that a resource spawn cell must be from every
+	 * map edge.  Default: 5000 cm = 50 m.
+	 * Applies to cluster centre points; individual cluster members may extend
+	 * slightly beyond this boundary by at most ClusterRadius.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Map Generator|Resources",
+		meta = (ClampMin = "0", UIMin = "0"))
+	float BorderMargin = 5000.f;
+
 	// -------------------------------------------------------------------------
 	// -------------------------------------------------------------------------
 

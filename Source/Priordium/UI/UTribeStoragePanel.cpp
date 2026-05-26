@@ -130,8 +130,6 @@ void UTribeStoragePanel::Refresh()
 		return;
 	}
 
-	int32 TribeIndex = 0;
-
 	for (TActorIterator<AActor> It(World, TribeActorClass); It; ++It)
 	{
 		AActor* Actor = *It;
@@ -156,8 +154,7 @@ void UTribeStoragePanel::Refresh()
 		const FLinearColor TribeColor =
 			*ColorProp->ContainerPtrToValuePtr<FLinearColor>(Actor);
 
-		AddTribeRow(TribeManager, TribeColor, TribeIndex);
-		++TribeIndex;
+		AddTribeRow(TribeManager, TribeColor);
 	}
 }
 
@@ -165,7 +162,7 @@ void UTribeStoragePanel::Refresh()
 // AddTribeRow
 // -------------------------------------------------------------------------
 
-void UTribeStoragePanel::AddTribeRow(ATribeManager* TribeManager, const FLinearColor& TribeColor, int32 TribeIndex)
+void UTribeStoragePanel::AddTribeRow(ATribeManager* TribeManager, const FLinearColor& TribeColor)
 {
 	if (!TribeListBox) return;
 
@@ -196,8 +193,10 @@ void UTribeStoragePanel::AddTribeRow(ATribeManager* TribeManager, const FLinearC
 
 	// ── Tribe label ───────────────────────────────────────────────────────
 	UTextBlock* TribeLabel = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-	TribeLabel->SetText(FText::FromString(
-		FString::Printf(TEXT("Tribe %d:  "), TribeIndex)));
+	const FString TribeName = (TribeManager && TribeManager->TribeActor)
+		? TribeManager->TribeActor->GetActorNameOrLabel()
+		: TEXT("Unknown Tribe");
+	TribeLabel->SetText(FText::FromString(TribeName + TEXT(":  ")));
 	TribeLabel->SetColorAndOpacity(FSlateColor(TribeColor));
 
 	UHorizontalBoxSlot* LabelSlot = Row->AddChildToHorizontalBox(TribeLabel);

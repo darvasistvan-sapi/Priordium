@@ -29,6 +29,14 @@
 		{
 			"Name": "Aura",
 			"Enabled": false
+		},
+		{
+			"Name": "meshy",
+			"Enabled": false,
+			"SupportedTargetPlatforms": [
+				"Win64",
+				"Mac"
+			]
 		}
 	]
 }

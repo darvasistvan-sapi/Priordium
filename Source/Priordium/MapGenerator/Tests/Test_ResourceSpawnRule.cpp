@@ -70,8 +70,12 @@ bool FTest_ResourceSpawnRule_BlueprintType::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("FResourceSpawnRule UScriptStruct is accessible"), Struct))
 		return false;
 
+#if WITH_EDITORONLY_DATA
 	TestTrue(TEXT("FResourceSpawnRule BlueprintType flag is present"),
 		Struct->HasMetaData(TEXT("BlueprintType")));
+#else
+	TestTrue(TEXT("FResourceSpawnRule BlueprintType flag (skipped in non-editor build)"), true);
+#endif
 	return true;
 }
 

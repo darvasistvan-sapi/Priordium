@@ -7,6 +7,7 @@
 #include "UHeightmapGenerator.h"
 #include "UMapGeneratorSettings.h"
 #include "TribeManager.h"
+#include "QuestManager.h"
 #include "ULandscapeBuilder.h"
 #include "GameFramework/Character.h"
 #include "Engine/World.h"
@@ -14,6 +15,7 @@
 #include "LandscapeProxy.h"
 #include "UObject/UnrealType.h"
 #include "EngineUtils.h"
+#include "Kismet/KismetSystemLibrary.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -94,6 +96,44 @@ bool UTribeGenerator::GenerateTribes(const UMapGeneratorSettings* Settings, cons
 		{
 			SpawnedTribeManagers.Add(TribeManager);
 			++SpawnedCount;
+		}
+	}
+
+	// ── Spawn a shared QuestManager and assign it to every TribeManager ─────
+	if (SpawnedCount > 0)
+	{
+		FActorSpawnParameters QMSpawnParams;
+		QMSpawnParams.SpawnCollisionHandlingOverride =
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AQuestManager* QuestManager = World->SpawnActor<AQuestManager>(
+			AQuestManager::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, QMSpawnParams);
+
+		if (QuestManager)
+		{
+			QuestManager->Tags.AddUnique(GMapGenTribeTag);
+			SpawnedActors.Add(QuestManager);
+
+			// Populate the quest resource pool from settings.
+			QuestManager->PossibleResourceTypes = Settings->QuestPossibleResourceTypes;
+
+			for (ATribeManager* TribeManager : SpawnedTribeManagers)
+			{
+				if (TribeManager)
+				{
+					TribeManager->QuestManager = QuestManager;
+				}
+			}
+
+			UE_LOG(LogTribeGenerator, Display,
+				TEXT("GenerateTribes: QuestManager spawned and assigned to %d tribe(s) with %d possible resource type(s)."),
+				SpawnedTribeManagers.Num(), QuestManager->PossibleResourceTypes.Num());
+		}
+		else
+		{
+			UE_LOG(LogTribeGenerator, Warning,
+				TEXT("GenerateTribes: Failed to spawn QuestManager from class '%s'."),
+				*AQuestManager::StaticClass()->GetName());
 		}
 	}
 
@@ -223,6 +263,12 @@ ATribeManager* UTribeGenerator::SpawnTribe(
 	TribeManager->TerrainLandscapeBuilder = LandscapeBuilder;
 	TribeManager->TribeFolderPath         = TribeFolderPath;
 
+	// Set the TribeMan class so CreateTribeMan() knows which Blueprint to spawn.
+	// Settings->TribeManClass is TSubclassOf<AActor>; TribeManager expects
+	// TSubclassOf<ACharacter> — both wrap a UClass*, so the Get() cast is safe
+	// here because GenerateTribes() already validated that it is a Character class.
+	TribeManager->TribeManClass = Settings->TribeManClass.Get();
+
 	AActor* TribeActor = SpawnTribeActor(World, SpawnLocation, Settings, SpawnParams, TribeIndex, TribeFolderPath);
 	if (!TribeActor)
 	{
@@ -251,7 +297,20 @@ ATribeManager* UTribeGenerator::SpawnTribe(
 	}
 
 	SpawnStorage(World, TribeManager, SpawnLocation, Settings, SpawnParams, Heightmap, TribeActor, TribeFolderPath, LandscapeBuilder);
-	SpawnTribeMen(World, TribeManager, SpawnLocation, Settings, SpawnParams, Heightmap, TribeActor, TribeFolderPath);
+
+	TArray<ACharacter*> NewTribeMen = SpawnTribeMen(
+		World, TribeManager, SpawnLocation,
+		Settings->TribeManClass,
+		Settings->TribeManCountPerTribe,
+		Settings->TribeManSpawnRadius,
+		TribeActor, TribeFolderPath,
+		Heightmap, Settings);
+
+	for (ACharacter* TribeMan : NewTribeMen)
+	{
+		TribeMan->Tags.AddUnique(GMapGenTribeTag);
+		SpawnedActors.Add(TribeMan);
+	}
 
 	return TribeManager;
 }
@@ -303,10 +362,12 @@ ATribeManager* UTribeGenerator::SpawnTribeManager(
 	}
 
 	TribeManager->Tags.AddUnique(GMapGenTribeTag);
+#if WITH_EDITOR
 	if (!TribeFolderPath.IsNone())
 	{
 		TribeManager->SetFolderPath(TribeFolderPath);
 	}
+#endif
 
 	return TribeManager;
 }
@@ -391,12 +452,26 @@ AActor* UTribeGenerator::SpawnTribeActor(
 	if (TribeActor)
 	{
 		TribeActor->Tags.AddUnique(GMapGenTribeTag);
+#if WITH_EDITOR
 		if (!TribeFolderPath.IsNone())
 		{
 			TribeActor->SetFolderPath(TribeFolderPath);
 		}
+#endif
 		SetTribeColor(TribeActor, TribeIndex, Settings->TribeCount);
 		SpawnedActors.Add(TribeActor);
+
+		UFunction* InitFunc = TribeActor->FindFunction(TEXT("Initialize"));
+		if (InitFunc)
+		{
+			TribeActor->ProcessEvent(InitFunc, nullptr);
+		}
+		else
+		{
+			UE_LOG(LogTribeGenerator, Warning,
+				TEXT("SpawnTribeActor: 'Initialize' function not found on '%s'."),
+				*TribeActor->GetClass()->GetName());
+		}
 	}
 	else
 	{
@@ -510,16 +585,56 @@ AActor* UTribeGenerator::SpawnBuilding(
 		Building->SetActorLocation(FVector(Location.X, Location.Y, GroundZ));
 	}
 
-	// 7. Register with the TribeManager.
+	// 7. Destroy every actor whose bounds overlap the building footprint,
+	//    skipping the building itself and any ALandscapeProxy actors.
+	{
+		FVector Origin, Extent;
+		Building->GetActorBounds(/*bOnlyCollidingComponents=*/false, Origin, Extent);
+
+		// Tiny expansion so actors whose pivot sits exactly on the edge are caught.
+		const FVector QueryExtent = Extent + FVector(5.f, 5.f, 5.f);
+
+		const TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes = {
+			UEngineTypes::ConvertToObjectType(ECC_WorldStatic),
+			UEngineTypes::ConvertToObjectType(ECC_WorldDynamic),
+		};
+		const TArray<AActor*> IgnoreActors = { Building };
+
+		TArray<AActor*> Overlapping;
+		UKismetSystemLibrary::BoxOverlapActors(
+			World, Origin, QueryExtent,
+			ObjectTypes, /*FilterClass=*/nullptr, IgnoreActors, Overlapping);
+
+		int32 DestroyedCount = 0;
+		for (AActor* Actor : Overlapping)
+		{
+			if (!IsValid(Actor)) continue;
+			if (Actor->IsA<ALandscapeProxy>()) continue;
+
+			Actor->Destroy();
+			++DestroyedCount;
+		}
+
+		if (DestroyedCount > 0)
+		{
+			UE_LOG(LogTribeGenerator, Verbose,
+				TEXT("SpawnBuilding: Destroyed %d overlapping actor(s) under '%s'."),
+				DestroyedCount, *Building->GetName());
+		}
+	}
+
+	// 8. Register with the TribeManager.
 	if (TribeManager)
 	{
 		TribeManager->storages.AddUnique(Building);
 	}
 
+#if WITH_EDITOR
 	if (!FolderPath.IsNone())
 	{
 		Building->SetFolderPath(FolderPath);
 	}
+#endif
 
 	return Building;
 }
@@ -553,67 +668,100 @@ void UTribeGenerator::SpawnStorage(
 	}
 }
 
-void UTribeGenerator::SpawnTribeMen(
+// static
+TArray<ACharacter*> UTribeGenerator::SpawnTribeMen(
 	UWorld*                      World,
 	ATribeManager*               TribeManager,
 	const FVector&               CenterLocation,
-	const UMapGeneratorSettings* Settings,
-	const FActorSpawnParameters& SpawnParams,
-	const UHeightmapGenerator*   Heightmap,
+	TSubclassOf<AActor>          TribeManClass,
+	int32                        Count,
+	float                        SpawnRadius,
 	AActor*                      TribeActor,
-	const FName&                 TribeFolderPath)
+	const FName&                 FolderPath,
+	const UHeightmapGenerator*   Heightmap,
+	const UMapGeneratorSettings* Settings)
 {
-	const int32 Count  = Settings->TribeManCountPerTribe;
-	const float Radius = Settings->TribeManSpawnRadius;
+	TArray<ACharacter*> Result;
+
+	if (!World || !TribeManClass || Count <= 0)
+	{
+		return Result;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride =
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
 	for (int32 i = 0; i < Count; ++i)
 	{
-		const float Angle   = (2.f * PI * i) / Count;
-		const float OffsetX = FMath::Cos(Angle) * Radius;
-		const float OffsetY = FMath::Sin(Angle) * Radius;
-		const float TribeManX = CenterLocation.X + OffsetX;
-		const float TribeManY = CenterLocation.Y + OffsetY;
+		// Evenly distribute around the circle; with Count=1 / SpawnRadius=0 this
+		// collapses to exactly CenterLocation.
+		const float Angle     = (Count > 1) ? (2.f * PI * i / Count) : 0.f;
+		const float TribeManX = CenterLocation.X + FMath::Cos(Angle) * SpawnRadius;
+		const float TribeManY = CenterLocation.Y + FMath::Sin(Angle) * SpawnRadius;
 
+		// Terrain-snap Z when a heightmap is provided; otherwise use CenterLocation.Z.
 		float TribeManZ = CenterLocation.Z;
-		Heightmap->GetTerrainHeight(World, TribeManX, TribeManY, TribeManZ, Settings);
+		if (Heightmap && Settings)
+		{
+			Heightmap->GetTerrainHeight(World, TribeManX, TribeManY, TribeManZ, Settings);
+		}
 
-		const FVector TribeManLocation(
-			TribeManX,
-			TribeManY,
-			TribeManZ + 100.f);
+		const FVector SpawnLocation(TribeManX, TribeManY, TribeManZ + 100.f);
 
 		AActor* TribeManActor = World->SpawnActor<AActor>(
-			Settings->TribeManClass, TribeManLocation, FRotator::ZeroRotator, SpawnParams);
+			TribeManClass, SpawnLocation, FRotator::ZeroRotator, SpawnParams);
 
-		if (TribeManActor)
+		if (!TribeManActor)
 		{
-			TribeManActor->Tags.AddUnique(GMapGenTribeTag);
-			if (ACharacter* TribeMan = Cast<ACharacter>(TribeManActor))
-			{
-				TribeManager->tribeMen.AddUnique(TribeMan);
-				if (TribeActor)
-				{
-					SetTribeOwner(TribeMan, TribeActor);
-				}
-				else
-				{
-					UE_LOG(LogTribeGenerator, Warning,
-						TEXT("SpawnTribeMen: Spawned TribeMan %d/%d is not a Character -- 'Tribe' property won't be set."),
-						i + 1, Count);
-				}
-				if (!TribeFolderPath.IsNone())
-				{
-					TribeMan->SetFolderPath(TribeFolderPath);
-				}
-			}
-			SpawnedActors.Add(TribeManActor);
+			UE_LOG(LogTribeGenerator, Warning,
+				TEXT("SpawnTribeMen: Failed to spawn TribeMan %d/%d."), i + 1, Count);
+			continue;
+		}
+
+		ACharacter* TribeMan = Cast<ACharacter>(TribeManActor);
+		if (!TribeMan)
+		{
+			UE_LOG(LogTribeGenerator, Warning,
+				TEXT("SpawnTribeMen: Spawned actor %d/%d is not a Character -- skipped."),
+				i + 1, Count);
+			TribeManActor->Destroy();
+			continue;
+		}
+
+		if (TribeManager)
+		{
+			TribeManager->tribeMen.AddUnique(TribeMan);
+		}
+
+		if (TribeActor)
+		{
+			SetTribeOwner(TribeMan, TribeActor);
+		}
+
+#if WITH_EDITOR
+		if (!FolderPath.IsNone())
+		{
+			TribeMan->SetFolderPath(FolderPath);
+		}
+#endif
+
+		UFunction* InitFunc = TribeManActor->FindFunction(TEXT("Initialize"));
+		if (InitFunc)
+		{
+			TribeManActor->ProcessEvent(InitFunc, nullptr);
 		}
 		else
 		{
 			UE_LOG(LogTribeGenerator, Warning,
-				TEXT("SpawnTribeMen: Failed to spawn TribeMan %d/%d."), i + 1, Count);
+				TEXT("SpawnTribeActor: 'Initialize' function not found on '%s'."),
+				*TribeManActor->GetClass()->GetName());
 		}
+
+		Result.Add(TribeMan);
 	}
+
+	return Result;
 }
 
 // static

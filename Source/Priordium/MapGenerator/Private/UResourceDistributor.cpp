@@ -119,9 +119,29 @@ TArray<FIntPoint> UResourceDistributor::CalculatePlacementAreas(
 		-(Res.X - 1) * CellSize * 0.5f,
 		-(Res.Y - 1) * CellSize * 0.5f);
 
-	for (int32 Y = 0; Y < Res.Y; ++Y)
+	// Convert the world-space border margin to a cell count.
+	// CeilToInt ensures we always stay at least BorderMargin cm from every edge.
+	const int32 MarginCells = (CellSize > 0.f)
+		? FMath::CeilToInt(BorderMargin / CellSize)
+		: 0;
+
+	const int32 XMin = MarginCells;
+	const int32 XMax = Res.X - MarginCells;
+	const int32 YMin = MarginCells;
+	const int32 YMax = Res.Y - MarginCells;
+
+	if (XMin >= XMax || YMin >= YMax)
 	{
-		for (int32 X = 0; X < Res.X; ++X)
+		UE_LOG(LogResourceDistributor, Warning,
+			TEXT("CalculatePlacementAreas -- BorderMargin (%.0f cm) leaves no valid cells "
+			     "for map resolution %dx%d with CellSize %.0f cm."),
+			BorderMargin, Res.X, Res.Y, CellSize);
+		return ValidCells;
+	}
+
+	for (int32 Y = YMin; Y < YMax; ++Y)
+	{
+		for (int32 X = XMin; X < XMax; ++X)
 		{
 			const float        Height  = Heightmap->GetHeightAt(X, Y);
 			const EBiomeType   Biome   = BiomeMgr->GetBiomeTypeAt(X, Y);

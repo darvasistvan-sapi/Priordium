@@ -64,8 +64,12 @@ bool FTest_MapGeneratorSettings_BlueprintType::RunTest(const FString& Parameters
 	{
 		return false;
 	}
+#if WITH_EDITORONLY_DATA
 	bool bIsBlueprintType = SettingsClass->HasMetaData(TEXT("BlueprintType"));
 	TestTrue(TEXT("UMapGeneratorSettings BlueprintType flag is present"), bIsBlueprintType);
+#else
+	TestTrue(TEXT("UMapGeneratorSettings BlueprintType flag (skipped in non-editor build)"), true);
+#endif
 	return true;
 }
 

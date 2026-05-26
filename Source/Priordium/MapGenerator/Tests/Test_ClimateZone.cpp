@@ -62,8 +62,12 @@ bool FTest_ClimateZone_BlueprintVisible::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
+#if WITH_EDITORONLY_DATA
 	bool bIsBlueprintType = ClimateEnum->HasMetaData(TEXT("BlueprintType"));
 	TestTrue(TEXT("EClimateZone BlueprintType flag is present"), bIsBlueprintType);
+#else
+	TestTrue(TEXT("EClimateZone BlueprintType flag (skipped in non-editor build)"), true);
+#endif
 	return true;
 }
 

@@ -83,8 +83,12 @@ bool FTest_BiomeType_BlueprintVisible::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
+#if WITH_EDITORONLY_DATA
 	bool bIsBlueprintType = BiomeEnum->HasMetaData(TEXT("BlueprintType"));
 	TestTrue(TEXT("EBiomeType BlueprintType flag is present"), bIsBlueprintType);
+#else
+	TestTrue(TEXT("EBiomeType BlueprintType flag (skipped in non-editor build)"), true);
+#endif
 	return true;
 }
 

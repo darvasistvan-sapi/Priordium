@@ -17,6 +17,7 @@
 
 #include "LandscapeComponent.h"       // ELandscapeLayerUpdateMode (runtime header, needed for FlattenArea)
 #include "RenderCommandFence.h"       // FlushRenderingCommands() – forces render thread sync after GPU texture uploads
+#include "NavigationSystem.h"         // UNavigationSystemV1::AddDirtyArea – navmesh rebuild after landscape edit
 
 #if WITH_EDITOR
 #include "LandscapeEdit.h"
@@ -262,6 +263,9 @@ ALandscape* ULandscapeBuilder::CreateLandscape(UWorld* World, const FTransform& 
 
 bool ULandscapeBuilder::ImportHeightmap(ALandscape* Landscape, const TArray<uint16>& HeightData, int32 Resolution)
 {
+#if !WITH_EDITOR
+	return false;  // Landscape import is editor-only; this path is never reached in packaged builds.
+#else
 	if (!Landscape) return false;
 
 	// Component and section count calculation
@@ -316,6 +320,7 @@ bool ULandscapeBuilder::ImportHeightmap(ALandscape* Landscape, const TArray<uint
 		TEXT("ImportHeightmap  --  done. %dx%d vertices."), Resolution, Resolution);
 
 	return true;
+#endif // WITH_EDITOR
 }
 
 void ULandscapeBuilder::ConfigureLandscapeTransform(ALandscape* Landscape, const UMapGeneratorSettings* Settings)
@@ -356,6 +361,7 @@ void ULandscapeBuilder::ConfigureLandscapeTransform(ALandscape* Landscape, const
 
 void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExtent, const UMapGeneratorSettings* Settings)
 {
+#if WITH_EDITOR
 	if (!GeneratedLandscape || !Settings)
 	{
 		UE_LOG(LogLandscapeBuilder, Warning, TEXT("FlattenArea: GeneratedLandscape or Settings is null."));
@@ -384,6 +390,10 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 		return;
 	}
 
+	// Expand the flattened area by 20% so the terrain around the building
+	// has a wider, gentler transition — reduces navmesh fragmentation at the edges.
+	const float ExpandedHalfExtent = HalfExtent * 1.2f;
+
 	// Convert world-space footprint bounds to landscape vertex indices.
 	const FVector LandLoc   = Landscape->GetActorLocation();
 	const FVector LandScale = Landscape->GetActorScale3D();
@@ -395,17 +405,10 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 	}
 
 	// Non-const: FLandscapeEditDataInterface::GetHeightData takes int32& (modifies the coords to actual extent)
-	int32 MinVertX = FMath::Clamp(FMath::FloorToInt((CenterX - HalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
-	int32 MinVertY = FMath::Clamp(FMath::FloorToInt((CenterY - HalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
-	int32 MaxVertX = FMath::Clamp(FMath::CeilToInt( (CenterX + HalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
-	int32 MaxVertY = FMath::Clamp(FMath::CeilToInt( (CenterY + HalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
-
-	UE_LOG(LogLandscapeBuilder, Display,
-		TEXT("FlattenArea: world(%.0f,%.0f)±%.0f  LandLoc(%.0f,%.0f)  Scale(%.1f,%.1f)  -> verts[%d,%d]-[%d,%d]  extent[%d,%d]-[%d,%d]"),
-		CenterX, CenterY, HalfExtent,
-		LandLoc.X, LandLoc.Y, LandScale.X, LandScale.Y,
-		MinVertX, MinVertY, MaxVertX, MaxVertY,
-		LandMinX, LandMinY, LandMaxX, LandMaxY);
+	int32 MinVertX = FMath::Clamp(FMath::FloorToInt((CenterX - ExpandedHalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
+	int32 MinVertY = FMath::Clamp(FMath::FloorToInt((CenterY - ExpandedHalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
+	int32 MaxVertX = FMath::Clamp(FMath::CeilToInt( (CenterX + ExpandedHalfExtent - LandLoc.X) / LandScale.X), LandMinX, LandMaxX);
+	int32 MaxVertY = FMath::Clamp(FMath::CeilToInt( (CenterY + ExpandedHalfExtent - LandLoc.Y) / LandScale.Y), LandMinY, LandMaxY);
 
 	if (MinVertX >= MaxVertX || MinVertY >= MaxVertY)
 	{
@@ -421,7 +424,6 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 	TArray<uint16> HeightData;
 	HeightData.SetNumZeroed(SizeX * SizeY);
 
-#if WITH_EDITOR
 	UWorld* World = GetWorld();
 	const bool bIsEditorWorld = World && World->WorldType == EWorldType::Editor;
 
@@ -470,13 +472,30 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 				return;
 			}
 
-			for (uint16& H : HeightData) { H = MinHeight; }
+			// Blend edges toward the original terrain height to avoid steep walls
+			// that fragment the navmesh. Interior vertices are fully flat; border
+			// vertices lerp smoothly back to their pre-flatten height.
+			{
+				const TArray<uint16> OriginalHeights = HeightData;
+				constexpr int32 BlendVerts = 4;
+				for (int32 VY = 0; VY < SizeY; ++VY)
+				{
+					for (int32 VX = 0; VX < SizeX; ++VX)
+					{
+						const int32 DistFromEdge = FMath::Min(FMath::Min(VX, SizeX - 1 - VX), FMath::Min(VY, SizeY - 1 - VY));
+						const float Alpha = FMath::Clamp(static_cast<float>(DistFromEdge) / BlendVerts, 0.f, 1.f);
+						const uint16 Orig = OriginalHeights[VY * SizeX + VX];
+						HeightData[VY * SizeX + VX] = static_cast<uint16>(
+							FMath::Lerp(static_cast<float>(Orig), static_cast<float>(MinHeight), Alpha));
+					}
+				}
+			}
 
 			LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY,
 				HeightData.GetData(), 0, /*CalcNormals=*/true);
 
 			UE_LOG(LogLandscapeBuilder, Display,
-				TEXT("FlattenArea: vertices [%d,%d]-[%d,%d] (%dx%d) flattened to uint16=%d."),
+				TEXT("FlattenArea: vertices [%d,%d]-[%d,%d] (%dx%d) flattened to uint16=%d (BlendVerts=4)."),
 				MinVertX, MinVertY, MaxVertX, MaxVertY, SizeX, SizeY, MinHeight);
 
 		} // ~FScopedSetLandscapeEditingLayer → RequestLayersContentUpdate fires here
@@ -507,7 +526,21 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 			return;
 		}
 
-		for (uint16& H : HeightData) { H = MinHeight; }
+		{
+			const TArray<uint16> OriginalHeights = HeightData;
+			constexpr int32 BlendVerts = 4;
+			for (int32 VY = 0; VY < SizeY; ++VY)
+			{
+				for (int32 VX = 0; VX < SizeX; ++VX)
+				{
+					const int32 DistFromEdge = FMath::Min(FMath::Min(VX, SizeX - 1 - VX), FMath::Min(VY, SizeY - 1 - VY));
+					const float Alpha = FMath::Clamp(static_cast<float>(DistFromEdge) / BlendVerts, 0.f, 1.f);
+					const uint16 Orig = OriginalHeights[VY * SizeX + VX];
+					HeightData[VY * SizeX + VX] = static_cast<uint16>(
+						FMath::Lerp(static_cast<float>(Orig), static_cast<float>(MinHeight), Alpha));
+				}
+			}
+		}
 
 		LandscapeEdit.SetHeightData(MinVertX, MinVertY, MaxVertX, MaxVertY,
 			HeightData.GetData(), 0, /*CalcNormals=*/true);
@@ -545,6 +578,19 @@ void ULandscapeBuilder::FlattenArea(float CenterX, float CenterY, float HalfExte
 	}
 
 	FlushRenderingCommands();
+
+	// Notify the navmesh system that the landscape geometry changed in this region.
+	// Without this, navmesh tiles over the flattened area stay stale and fragment.
+	// This must come AFTER FlushRenderingCommands() so the collision body is up-to-date
+	// before the navmesh queries the new geometry.
+	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+	{
+		const FBox DirtyArea(
+			FVector(CenterX - ExpandedHalfExtent, CenterY - ExpandedHalfExtent, -HALF_WORLD_MAX),
+			FVector(CenterX + ExpandedHalfExtent, CenterY + ExpandedHalfExtent,  HALF_WORLD_MAX)
+		);
+		NavSys->AddDirtyArea(DirtyArea, ENavigationDirtyFlag::All);
+	}
 #endif
 }
 
