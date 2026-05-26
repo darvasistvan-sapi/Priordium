@@ -4,26 +4,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "TribeQuestManager.h"
+#include "TribeBuyingManager.h"
+#include "TribeResourcePaths.h"
 #include "TribeManager.generated.h"
 
 class ACharacter;
-class ANavigationData;
-class UNavigationSystemV1;
 class TribeTask;
 class UHeightmapGenerator;
 class UMapGeneratorSettings;
 class ULandscapeBuilder;
-class AQuestManager;
-class UQuest;
 class UTradeOffer;
-
-/** A storage–resource pair with the navmesh path length between them. */
-struct FStorageResourcePath
-{
-	TWeakObjectPtr<AActor> Storage;
-	TWeakObjectPtr<AActor> Resource;
-	float PathLength = 0.f;
-};
 
 /**
  * One entry in the sorted result of FindLocationsWithResources().
@@ -143,37 +134,34 @@ public:
 	UPROPERTY()
 	TObjectPtr<ULandscapeBuilder> TerrainLandscapeBuilder;
 
-	UPROPERTY()
-	TArray<TObjectPtr<UTradeOffer>> ReceivedTradeOffers;
-
-	UPROPERTY()
-	TArray<TObjectPtr<UQuest>> TradeQuests;
-
 	// The BP_Tribe actor that owns this manager.
 	// Passed to SpawnBuilding() so new storages get their "Tribe" property set.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
 	TObjectPtr<AActor> TribeActor;
 
 	/**
-	 * The shared QuestManager for all tribes.
-	 * Set by UTribeGenerator after spawning so every tribe can read/register quests.
+	 * Quest and trade-offer subsystem for this tribe.
+	 * Created in the constructor; holds QuestManager, ReceivedTradeOffers,
+	 * TradeQuests, and all quest/trade logic.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
-	TObjectPtr<AQuestManager> QuestManager;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Quest")
+	TObjectPtr<UTribeQuestManager> QuestHandler;
 
 	/**
-	 * The BP_ItemPrices Blueprint class. TribeManager creates one instance from it
-	 * at BeginPlay and uses that instance for all GetItemPrice() lookups.
+	 * Purchasing subsystem for this tribe.
+	 * Created in the constructor; holds ItemPrices, price lookup, affordability
+	 * checks, resource deduction, building construction, and TribeMan recruitment.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
-	TSubclassOf<UObject> ItemPrices;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Buying")
+	TObjectPtr<UTribeBuyingManager> BuyingHandler;
 
 	/**
-	 * Name of the TMap<TSubclassOf<AActor>, BP_ItemPrice_C> property on BP_ItemPrices.
-	 * Must match the Blueprint variable name exactly (default: "Prices").
+	 * Resource-path subsystem for this tribe.
+	 * Owns nearby resource census, async navmesh path lengths, occupied-resource
+	 * tracking, and TribeMan collection dispatch.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tribe")
-	FName ItemPricesPricesPropertyName = FName(TEXT("Prices"));
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Resources")
+	TObjectPtr<UTribeResourcePaths> ResourcePaths;
 
 	// Outliner folder path for this tribe (e.g. "Tribes/Tribe_0").
 	// Passed to SpawnBuilding() so newly built actors land in the correct folder.
@@ -183,26 +171,6 @@ public:
 	// -------------------------------------------------------------------------
 	// Public methods
 	// -------------------------------------------------------------------------
-
-	UFUNCTION(BlueprintCallable, Category = "Tribe")
-	void CheckQuests();
-
-	/**
-	 * Spawns a building of the given class at Location, snaps it to the terrain,
-	 * optionally flattens the landscape under it, and adds it to storages.
-	 * Deducts the construction cost via GetItemPrice first; returns nullptr if
-	 * the price is not found or there are insufficient resources.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Tribe")
-	AActor* Build(TSubclassOf<AActor> BuildingClass, FVector Location);
-
-	/**
-	 * Spawns a new TribeMan of TribeManClass near a random storage (≈ 10 m away)
-	 * on a free navmesh position. Deducts the cost via GetItemPrice first.
-	 * Returns the new ACharacter* on success, nullptr on failure.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Tribe")
-	ACharacter* CreateTribeMan();
 
 	/**
 	 * Returns the total amount of the given resource across all storages.
@@ -238,74 +206,6 @@ public:
 	TArray<FResourceLocationCandidate> FindLocationsWithResources() const;
 
 	/**
-	 * Looks up the cost for ItemClass in the ItemPrices object and returns it as a
-	 * flat list of (ResourceTypeName, Amount) pairs ready for CanAfford / DeductResources.
-	 * Returns an empty array if ItemPrices is not set, the class has no entry, or the
-	 * 'Resources' map property cannot be resolved.
-	 *
-	 * @param ItemClass  The building/item class to look up the price for.
-	 * @return           Cost pairs, or empty on any failure.
-	 */
-	TArray<TPair<FName, int32>> GetItemPrice(TSubclassOf<AActor> ItemClass) const;
-
-	/**
-	 * For every quest in QuestManager->Quests, calculates the still-missing
-	 * resource amounts (RequiredAmount - GetResourceAmount, floored at 0).
-	 * Returns a list of (Quest, missing requirements) pairs sorted ascending
-	 * by the total missing amount — the most affordable quest comes first.
-	 * Requirements that are already fully satisfied are omitted from the inner array.
-	 * Returns an empty array if QuestManager is not set or has no quests.
-	 */
-	TArray<TPair<UQuest*, TArray<TPair<FName, int32>>>> GetQuestResourceNeeds() const;
-
-	/**
-	 * Reviews RecievedTradeOffers and executes any exchange that helps gather
-	 * resources for the given quests while guaranteeing:
-	 *   1. No quest-reserved resource is traded away (only surplus is given).
-	 *   2. Sent total == received total (1:1 quantity balance).
-	 *
-	 * Internally delegates to FilterActiveQuestNeeds, ComputeSurplusAndDeficit,
-	 * FilterByBudget, and BalanceExchangeItems (see private helpers).
-	 *
-	 * @param Quests  Active quests whose resource needs must be protected.
-	 */
-	void ExecuteTradeOffersForQuests(const TArray<UQuest*>& Quests);
-
-	/**
-	 * Derives Surplus / Deficit from the given quests and broadcasts a
-	 * UTradeOffer to every other tribe currently in AllTribeManagers.
-	 *
-	 * For each other ATribeManager:
-	 *   Offered   = resource types where this tribe has a surplus above its
-	 *               combined quest requirements (safe to give away).
-	 *   Requested = resource types this tribe still needs to gather (deficit).
-	 *
-	 * Each offer is added to the recipient's RecievedTradeOffers array.
-	 * Does nothing if there is no surplus and no deficit, or if none of the
-	 * supplied quests are active in QuestManager.
-	 *
-	 * @param Quests  Active quests used to derive Surplus / Deficit.
-	 */
-	void CreateTradeOfferForQuests(const TArray<UQuest*>& Quests);
-
-	/**
-	 * Attempts to complete the given quest for this tribe.
-	 *
-	 * Steps:
-	 *  1. Validates Quest and QuestManager are set.
-	 *  2. Checks that the tribe can afford every requirement in Quest->Requirements
-	 *     (summed across all storages via GetResourceAmount).
-	 *  3. Deducts the required resources from storages.
-	 *  4. Removes the quest from QuestManager->Quests.
-	 *  5. Calls QuestManager->RegisterCompletion(TribeActor) to increment the counter.
-	 *
-	 * Returns true if the quest was successfully completed, false otherwise
-	 * (insufficient resources, null quest, quest not in manager, etc.).
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Tribe")
-	bool CompleteQuest(UQuest* Quest);
-
-	/**
 	 * Adds Amount of ResourceType to the first storage that already contains
 	 * that resource type key. Returns true on success.
 	 * Used by trade exchange to credit incoming resources.
@@ -318,36 +218,30 @@ public:
 	 */
 	bool DeductResourceAmount(FName ResourceType, int32 Amount);
 
-	/** Main update entry point. Called every 10 seconds via timer. */
+	/** Main update entry point. Called every few seconds via timer. */
 	void Manage();
 
-	/** Removes stale references from all collections, then cleans dependent ones. */
+	/** Removes stale references from TribeMan/storage collections, then delegates
+	 *  resource-path cleanup to ResourcePaths->CheckNullReferences(). */
 	void CheckNullReferences();
 
-	/** Populates storageResourcePathLengths via async navmesh path queries. */
-	UFUNCTION(BlueprintCallable, Category = "Tribe")
-	void calculateStorageResourcePathLengths();
+	// -------------------------------------------------------------------------
+	// Task registry accessors
+	// Used by UTribeResourcePaths to assign and query TribeMan tasks without
+	// exposing the private tribeManTasks map directly.
+	// -------------------------------------------------------------------------
 
-	/**
-	 * Flattens storageResourcePathLengths into storageResourcePaths,
-	 * excluding occupied resources, and sorts ascending by path length.
-	 */
-	void calculateStorageResourcePaths();
+	/** Returns true if TribeMan already has an assigned task. */
+	bool HasTribeManTask(ACharacter* TribeMan) const;
 
-	/** Assigns a ResourceGatheringTask to TribeMan for the given Resource. */
-	void collectResource(AActor* TribeMan, AActor* Resource);
+	/** Registers Task as the active task for TribeMan. */
+	void AssignTribeManTask(ACharacter* TribeMan, TSharedPtr<TribeTask> Task);
 
-	TObjectPtr<AActor> GetFirstNearbyRaspBerry() const;
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-
-
-	// Instance created from ItemPrices class at BeginPlay.
-	UPROPERTY()
-	TObjectPtr<UObject> ItemPricesInstance;
 
 	// TribeMan -> their current task
 	TMap<TObjectPtr<ACharacter>, TSharedPtr<TribeTask>> tribeManTasks;
@@ -356,103 +250,12 @@ private:
 	// was called. Cleared when they start moving; task is dropped after threshold.
 	TMap<TObjectPtr<ACharacter>, int32> TribeManResumeFailures;
 
-	TSet<TWeakObjectPtr<AActor>> OccupiedResources;
-
-	// All resources within search radius of any storage
-	TArray<TObjectPtr<AActor>> nearbyResources;
-
-	// storage -> (resource -> navmesh path length in cm)
-	TMap<TWeakObjectPtr<AActor>, TMap<TWeakObjectPtr<AActor>, float>> storageResourcePathLengths;
-
-	// Storage-resource pairs that are not occupied, sorted ascending by path length.
-	// Populated by calculateStorageResourcePaths().
-	TArray<FStorageResourcePath> storageResourcePaths;
-
-	// Timer handle for the 10-second Manage tick
+	// Timer handle for the Manage tick
 	FTimerHandle ManageTimerHandle;
-
-	// Number of async path queries currently in flight.
-	// When it reaches 0, calculateStorageResourcePaths() is called automatically.
-	int32 PendingPathQueries = 0;
-
-	// -------------------------------------------------------------------------
-	// Internal path-length calculation
-	// -------------------------------------------------------------------------
-
-	void CalculateStorageResourcePathLengths(
-		TWeakObjectPtr<AActor> Storage,
-		UWorld* WorldContext,
-		UNavigationSystemV1* NavigationSystem,
-		const ANavigationData* NavigationData
-	);
-	void CalculateStorageResourcePathLength(
-		TWeakObjectPtr<AActor> Storage,
-		TWeakObjectPtr<AActor> Resource,
-		UNavigationSystemV1* NavigationSystem,
-		const ANavigationData* NavigationData
-	);
 
 	// -------------------------------------------------------------------------
 	// Internal helpers
 	// -------------------------------------------------------------------------
-
-	/**
-	 * Returns the raw BP_ItemPrice_C UObject* for ItemClass from ItemPricesInstance.
-	 * Internal helper used by GetItemPrice().
-	 */
-	UObject* GetItemPriceObject(TSubclassOf<AActor> ItemClass) const;
-	bool DeductResources(TArray<TPair<FName, int32>> Costs);
-	bool CanAfford(TArray<TPair<FName, int32>> Costs) const;
-
-	// ── Trade helpers ─────────────────────────────────────────────────────────
-
-	/**
-	 * Calls GetQuestResourceNeeds() and removes every entry whose quest pointer
-	 * is not contained in Quests. Returns the filtered array.
-	 */
-	TArray<TPair<UQuest*, TArray<TPair<FName, int32>>>> FilterActiveQuestNeeds(
-		const TArray<UQuest*>& Quests) const;
-
-	/**
-	 * From the given quest-needs array, aggregates each quest's Requirements into
-	 * a per-type TotalRequired map, then derives:
-	 *   OutSurplus[type] = max(0, GetResourceAmount(type) − TotalRequired[type])
-	 *   OutDeficit[type] = max(0, TotalRequired[type] − GetResourceAmount(type))
-	 *
-	 * Both out-maps are cleared before writing.
-	 */
-	void ComputeSurplusAndDeficit(
-		const TArray<TPair<UQuest*, TArray<TPair<FName, int32>>>>& QuestNeeds,
-		TMap<FName, int32>& OutSurplus,
-		TMap<FName, int32>& OutDeficit) const;
-
-	/**
-	 * If there is enough wood, finds a free build location near an existing
-	 * storage and calls Build() to construct a new storage.
-	 * Called every Manage() tick; the wood cost naturally limits the build rate.
-	 */
-	void TryBuildStorage();
-
-	/**
-	 * Finds a random world position within 1 km of an existing storage that:
-	 *   - lies on the navigation mesh, and
-	 *   - has no overlapping actors within a 5 m clearance radius.
-	 * Returns true and sets OutLocation on success.
-	 */
-	bool FindFreeBuildLocation(FVector& OutLocation) const;
-
-	/**
-	 * Finds a world position approximately 10 m from a randomly chosen storage
-	 * that lies on the navigation mesh and has no overlapping actors within a
-	 * 1 m clearance radius (suitable for spawning a character).
-	 * Returns true and sets OutLocation on success.
-	 */
-	bool FindFreeTribeManSpawnLocation(FVector& OutLocation) const;
-
-	void calculateNearbyResources();
-
-	/** Assigns a free resource from storageResourcePaths to each idle TribeMan. */
-	void orderTribeMenToCollect();
 
 	/**
 	 * Iterates all TribeMen. For each one that has a task assigned in tribeManTasks
@@ -460,9 +263,6 @@ private:
 	 * after reaching a destination or being interrupted.
 	 */
 	void resumeIdleTribeManTasks();
-
-	/** Deferred one-tick callback that calls calculatePrices() on ItemPricesInstance. */
-	void CallCalculatePrices();
 
 	/**
 	 * Returns the world locations of all storage actors currently present in the world.
@@ -487,10 +287,7 @@ private:
 	 */
 	void RescueTribeManToNavmesh(ACharacter* TribeMan);
 
-	bool checkNearbyResources();
-	bool checkOccupiedResources();
 	bool checkTribeMen();
 	bool checkStorages();
 	bool checkTribeManTasks();
-	bool checkStorageResourcePathLengths();
 };

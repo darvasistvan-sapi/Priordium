@@ -121,7 +121,7 @@ bool UTribeGenerator::GenerateTribes(const UMapGeneratorSettings* Settings, cons
 			{
 				if (TribeManager)
 				{
-					TribeManager->QuestManager = QuestManager;
+					TribeManager->QuestHandler->QuestManager = QuestManager;
 				}
 			}
 
@@ -351,7 +351,7 @@ ATribeManager* UTribeGenerator::SpawnTribeManager(
 	// of BP_ItemPrices and call calculatePrices() on it.
 	if (ItemPricesClass)
 	{
-		TribeManager->ItemPrices = ItemPricesClass;
+		TribeManager->BuyingHandler->ItemPrices = ItemPricesClass;
 	}
 	else
 	{
